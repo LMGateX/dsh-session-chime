@@ -15,8 +15,8 @@
  */
 import { Config, resolveRowConfig, type RowConfigInput } from './config.ts'
 
-/** Registered plugin name. */
-export const name = 'session-chime'
+/** Registered plugin name; matches the package name and the profile row id. */
+export const name = 'dsh-session-chime'
 
 /** The host half needs no service: the chime is browser-side. */
 export const inject: readonly string[] = []
@@ -44,7 +44,7 @@ interface HostContext {
 export function apply(ctx: HostContext, config: RowConfigInput = {}): void {
   const resolved = resolveRowConfig(config)
   ctx.logger.debug(
-    `session-chime: mounted (enabled=${resolved.enabled}, soundDone=${resolved.soundDone}, ` +
+    `dsh-session-chime: mounted (enabled=${resolved.enabled}, soundDone=${resolved.soundDone}, ` +
     `soundBlocked=${resolved.soundBlocked}, volume=${resolved.volume}, durationMs=${resolved.durationMs}, ` +
     `debounceMs=${resolved.debounceMs}) — the browser half owns every chime.`,
   )

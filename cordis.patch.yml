@@ -1,5 +1,9 @@
 # One settings row: the plugin card on 插件 → 会话铃声. The row's browser half
-# registers the `plugins.row.config` form and owns every option below.
+# registers the plugins.row.config form and owns every option below.
+#
+# The id matches the package name on purpose: the plugin manager lists rows by
+# id, the Web boot audit names entries by package, and a mismatch between the
+# two is what made this row hard to find and disable.
 - insert:
-    - id: session-chime
+    - id: dsh-session-chime
       name: dsh-session-chime

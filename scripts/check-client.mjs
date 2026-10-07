@@ -46,9 +46,12 @@ const api = registry.entry.factory(name => {
 });
 
 check(JSON.stringify(requested.filter(name => name !== 'react')) === '[]', 'the bundle requires ' + JSON.stringify(requested));
-check(api.ROW_ID === 'session-chime', 'ROW_ID is ' + String(api.ROW_ID));
-check(api.inject?.required?.includes('sessions') && api.inject?.required?.includes('configForms'), 'the bundle does not require the session catalog and settings form services');
-check(api.inject?.optional?.includes('jobs'), 'the job roster service is not optional');
+check(api.ROW_ID === 'dsh-session-chime', 'ROW_ID is ' + String(api.ROW_ID));
+check(Array.isArray(api.inject), 'the client inject declaration is ' + typeof api.inject + ', not a service-name array');
+check(api.inject.every(item => typeof item === 'string'), 'the client inject declaration holds a non-string');
+check(!api.inject.includes('required') && !api.inject.includes('optional'), 'the client inject declaration leaks the required/optional keys');
+check(api.inject.includes('sessions') && api.inject.includes('configForms') && api.inject.includes('slots'), 'the bundle does not declare the session catalog, settings form and slot services');
+check(!api.inject.includes('jobs'), 'the job roster service must stay unscoped so the chime still loads without it');
 check(api.SOUND_IDS.length === 6, 'expected 6 shipped chimes, found ' + api.SOUND_IDS.length);
 check(typeof api.isSettled === 'function' && typeof api.createWatcher === 'function' && typeof api.createEditor === 'function', 'the bundle stops exporting its testable helpers');
 check(typeof api.inQuietHours === 'function' && typeof api.effectiveWindowMs === 'function', 'the bundle stops exporting its quiet-period helpers');

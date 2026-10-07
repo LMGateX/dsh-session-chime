@@ -48,7 +48,7 @@ window.__ModuleLoader__.load({
     const React = require('react') as ReactRuntime
 
     /** Loader row id declared by this bundle's patch. */
-    const ROW_ID = 'session-chime'
+    const ROW_ID = 'dsh-session-chime'
 
     /** The bundle id the shell registers; must match the npm package name. */
     const BUNDLE_ID = 'dsh-session-chime'
@@ -519,7 +519,7 @@ window.__ModuleLoader__.load({
       readonly key: string
       readonly kind: 'boolean' | 'enum' | 'number' | 'time' | 'range'
       /** Section this field is grouped under, in first-appearance order. */
-      readonly section: Text
+      readonly section: Section
       readonly label: Text
       readonly hint: Text
       /** Choice list for `enum` fields. */
@@ -617,11 +617,18 @@ window.__ModuleLoader__.load({
     const SOUND_CHOICES: readonly { value: string; label: Text }[] = Object.keys(__CHIME_SOUNDS)
       .map(id => ({ value: id, label: { zh: __CHIME_SOUNDS[id]!.label + '（' + id + '）', en: id } }))
 
-    /** Section labels, in display order. */
-    const SECTIONS: readonly Text[] = [
-      { zh: '提示音', en: 'Chimes' },
-      { zh: '安静规则', en: 'Quiet hours' },
-      { zh: '停止与提示卡', en: 'Stopping and the card' },
+    /** One form section: its bilingual label and the accent rail's colour. */
+    interface Section {
+      readonly text: Text
+      /** Theme token used for the rail; distinct per section so the form reads at a glance. */
+      readonly tone: string
+    }
+
+    /** Section labels and tones, in display order. */
+    const SECTIONS: readonly Section[] = [
+      { text: { zh: '提示音', en: 'Chimes' }, tone: 'var(--dsw-alias-state-business-primary)' },
+      { text: { zh: '安静规则', en: 'Quiet hours' }, tone: 'var(--dsw-alias-state-warn-primary)' },
+      { text: { zh: '停止与提示卡', en: 'Stopping and the card' }, tone: 'var(--dsw-alias-state-success-primary)' },
     ]
     const SOUNDS_SECTION = SECTIONS[0]!
     const QUIET_SECTION = SECTIONS[1]!
@@ -1034,7 +1041,7 @@ window.__ModuleLoader__.load({
         display: 'grid', placeItems: 'center', width: 38, height: 38, flexShrink: 0,
         borderRadius: 'var(--dsw-radius-lg)', fontSize: 18,
         background: 'var(--dsw-alias-interactive-bg-hover-accent)',
-        border: '1px solid var(--dsw-alias-border-l1)',
+        border: '1px solid var(--dsw-alias-state-business-primary)',
       },
       headerCopy: { display: 'grid', gap: 3 },
       title: { margin: 0, fontSize: 16, fontWeight: 600, lineHeight: 1.3 },
@@ -1059,14 +1066,14 @@ window.__ModuleLoader__.load({
         color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-3)', font: 'inherit',
       },
       switchRow: { display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'space-between' },
-      switchText: { color: 'var(--dsw-alias-brand-text)', fontWeight: 600 },
+      switchText: { color: 'var(--dsw-alias-state-business-primary)', fontWeight: 600 },
       check: { display: 'flex', gap: 8, alignItems: 'center' },
-      checkbox: { width: 16, height: 16, accentColor: 'var(--dsw-alias-brand-primary)' },
+      checkbox: { width: 16, height: 16, accentColor: 'var(--dsw-alias-state-business-primary)' },
       rangeRow: { display: 'flex', gap: 10, alignItems: 'center' },
-      range: { flex: 1, accentColor: 'var(--dsw-alias-brand-primary)' },
+      range: { flex: 1, accentColor: 'var(--dsw-alias-state-business-primary)' },
       rangeValue: {
         minWidth: 44, textAlign: 'right', fontWeight: 600,
-        color: 'var(--dsw-alias-brand-text)', fontVariantNumeric: 'tabular-nums',
+        color: 'var(--dsw-alias-state-business-primary)', fontVariantNumeric: 'tabular-nums',
       },
       number: {
         boxSizing: 'border-box', width: '100%', padding: '8px 10px',
@@ -1088,8 +1095,8 @@ window.__ModuleLoader__.load({
       accentButton: {
         padding: '7px 12px', cursor: 'pointer', fontWeight: 600, font: 'inherit',
         borderRadius: 'var(--dsw-radius-md)',
-        color: 'var(--dsw-alias-brand-text)',
-        border: '1px solid var(--dsw-alias-brand-primary)',
+        color: 'var(--dsw-alias-state-business-primary)',
+        border: '1px solid var(--dsw-alias-state-business-primary)',
         background: 'var(--dsw-alias-interactive-bg-hover-accent)',
       },
       error: { margin: 0, color: 'var(--dsw-alias-label-error)', lineHeight: 1.6 },
@@ -1127,8 +1134,17 @@ window.__ModuleLoader__.load({
       en: 'Ring when a session truly stops — no running turn, no live job, no working subagent — or when its goal becomes blocked. Chimes, volume, the playback window, quiet rules and the stop card live here.',
     }
 
-    /** Services Cordis activates before this bundle runs; `jobs` is optional. */
-    const inject = { required: ['slots', 'configForms', 'sessions'], optional: ['jobs'] }
+    /**
+     * Client services the module system activates before this bundle runs.
+     *
+     * This MUST stay a flat array of service names. The browser entry tree treats
+     * an object here as a service map and reads its keys, so
+     * `{ required: [...], optional: [...] }` became two services literally named
+     * `required` and `optional`: the fiber waited forever and the Web boot audit
+     * reported "1 entry did not activate" for the whole page. An unscoped service
+     * is optional by nature — `jobs` is read through `ctx.get` below.
+     */
+    const inject = ['slots', 'configForms', 'sessions']
 
     /**
      * Mount the watcher and the configuration page on the shared platform React.
@@ -1343,17 +1359,17 @@ window.__ModuleLoader__.load({
         h('header', { key: 'header', style: styles.header },
           h('span', { key: 'badge', style: styles.headerBadge }, '🔔'),
           h('div', { key: 'copy', style: styles.headerCopy },
-            h('h2', { key: 'title', style: styles.title }, t({ zh: '会话铃声', en: 'Session chime' })),
+            h('h2', { key: 'title', style: styles.title }, t({ zh: '响铃设置', en: 'Chime settings' })),
             h('p', { key: 'subtitle', style: styles.subtitle }, t({
-              zh: '会话真正停下（无运行回合、无后台作业、无工作子代理）或目标受阻时响铃；铃声与安静规则在这里设置，保存即生效。',
-              en: 'Ring when a session truly stops — no running turn, no live job, no working subagent — or when its goal becomes blocked. Everything here applies the moment you save.',
+              zh: '会话真正停下（无运行回合、无后台作业、无工作子代理）或目标受阻时响铃；下面三项分别是铃声、安静规则与停止方式，保存即生效。',
+              en: 'Ring when a session truly stops — no running turn, no live job, no working subagent — or when its goal becomes blocked: chimes, quiet rules and how a ring stops, applied the moment you save.',
             })))),
         !state.writable && h('p', { key: 'readonly', style: styles.hint, role: 'status' }, t({
           zh: '当前连接或配置文档为只读。',
           en: 'This connection or configuration document is read-only.',
         })),
-        grouped.map(group => h('section', { key: group.section.en, style: styles.card },
-          h('h3', { key: 'title', style: styles.sectionTitle }, t(group.section)),
+        grouped.map(group => h('section', { key: group.section.text.en, style: styles.card },
+          h('h3', { key: 'title', style: { ...styles.sectionTitle, borderLeftColor: group.section.tone, color: group.section.tone } }, t(group.section.text)),
           group.fields.map(field))),
         h('p', { key: 'note', style: styles.hint }, t({
           zh: '保存即生效：浏览器半边直接读这份配置，改铃声、音量或时长会在下一声立刻生效。',

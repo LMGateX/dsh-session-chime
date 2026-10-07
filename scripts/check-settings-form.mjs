@@ -164,7 +164,7 @@ if (failures.length > 0) {
   for (const failure of failures) console.error('  - ' + failure)
   process.exit(1)
 }
-console.log('OK: the host settings service describes a live "session-chime" namespace with all ' + EXPECTED_FIELDS.length + ' volatile fields,')
+console.log('OK: the host settings service describes a live "dsh-session-chime" namespace with all ' + EXPECTED_FIELDS.length + ' volatile fields,')
 console.log('    both chime unions and the shipped defaults; a saved chime passes the volatility check on the write path.')
 
 /** Resolve the dsh installation package.json behind the configured executable. */

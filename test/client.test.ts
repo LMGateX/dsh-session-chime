@@ -13,7 +13,6 @@ import type { ConfigForm, ConfigFormSnapshot, PathOperation, SessionListSnapshot
 type Reason = 'done' | 'blocked';
 
 interface ClientApi {
-  inject: unknown;
   apply(ctx: unknown): void;
   isSettled(input: { running: boolean; liveJobs: number; liveChildren: number; goalPhase: string | null }): boolean;
   createWatcher(deps: Record<string, unknown>): { update(sessions: SessionListSnapshot, jobs: { rows: Record<string, readonly { status: string; owner?: string }[]> } | undefined): void };
@@ -36,6 +35,7 @@ interface ClientApi {
   shouldStopOnGesture(startedAt: number | undefined, now: number, minRingMs: number): boolean;
   gestureStopsRing(placement: string, bannerShown: boolean, startedAt: number | undefined, now: number, minRingMs: number): boolean;
   PLACEMENTS: string[];
+  inject: string[];
   ROW_ID: string;
   FIELDS: string[];
   SOUND_IDS: string[];
@@ -368,6 +368,19 @@ test('effectiveWindowMs applies the master switch and the quiet rules', () => {
   assert.equal(client.effectiveWindowMs(dnd, 500, at(12)), 500);
 });
 
+test('the bundle declares a flat service-name inject list', () => {
+  // Regression guard for the 0.5.1 boot failure: an object here is read as a
+  // service map, so { required, optional } waits on two phantom services and
+  // the Web boot audit fails the entire page.
+  assert.ok(Array.isArray(client.inject), 'inject must be an array, got ' + typeof client.inject);
+  assert.deepEqual(client.inject, ['slots', 'configForms', 'sessions']);
+  for (const service of client.inject) {
+    assert.equal(typeof service, 'string', 'inject entries must be service names');
+    assert.notEqual(service, 'required');
+    assert.notEqual(service, 'optional');
+  }
+});
+
 test('shortest-ring guard: activity cannot cut a ring too early', () => {
   assert.equal(client.shouldStopOnGesture(undefined, 10_000, 3000), false);
   assert.equal(client.shouldStopOnGesture(1000, 2500, 3000), false);
@@ -404,7 +417,7 @@ test('parse helpers reject junk', () => {
 });
 
 test('the bundle declares its row and the shipped chime set', () => {
-  assert.equal(client.ROW_ID, 'session-chime');
+  assert.equal(client.ROW_ID, 'dsh-session-chime');
   assert.deepEqual(client.SOUND_IDS, ['chime-soft', 'bell-bright', 'marimba', 'alert-low', 'alert-sharp', 'blip']);
   assert.deepEqual(client.FIELDS, [
     'enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs',

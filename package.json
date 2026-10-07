@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-chime",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "DSH plugin: ring when a session truly stops (no running turn, no live job, no working subagent), with do-not-disturb windows and rest mode",
   "repository": {
     "type": "git",
