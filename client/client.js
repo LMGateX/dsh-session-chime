@@ -37,8 +37,10 @@ window.__ModuleLoader__.load({
         const BUNDLE_ID = 'dsh-session-chime';
         /** Job statuses that count as live work for the owning session. */
         const LIVE_JOB = ['running', 'stopping'];
-        /** Longest playback window a saved duration can request. */
-        const MAX_WINDOW_MS = 8000;
+        /** Longest playback window a saved duration can request (mirrors src/config.ts). */
+        const MAX_WINDOW_MS = 6 * 60 * 60 * 1000;
+        /** Local `HH:mm`, or the empty string for "always". */
+        const CLOCK = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
         /** Gap between repeats when a short chime is stretched over a longer window. */
         const REPEAT_GAP_SECONDS = 0.12;
         /** Shortest gap between two chimes for one session. */
@@ -206,6 +208,27 @@ window.__ModuleLoader__.load({
                 },
             };
         }
+        /** A tiny observable boolean, so one switch can subscribe to a slice of the form. */
+        function createFlag(initial) {
+            const listeners = new Set();
+            let value = initial;
+            return {
+                getSnapshot: () => value,
+                subscribe(listener) {
+                    listeners.add(listener);
+                    return () => {
+                        listeners.delete(listener);
+                    };
+                },
+                set(next) {
+                    if (next === value)
+                        return;
+                    value = next;
+                    for (const listener of listeners)
+                        listener();
+                },
+            };
+        }
         /** Decode one embedded data URL into raw bytes. */
         function decodeBase64(data) {
             const comma = data.indexOf(',');
@@ -222,6 +245,7 @@ window.__ModuleLoader__.load({
          */
         function createAudio(readSettings) {
             let context;
+            let stopCurrent;
             const buffers = new Map();
             function ensure() {
                 if (context !== undefined)
@@ -248,6 +272,9 @@ window.__ModuleLoader__.load({
             }
             return {
                 unlock,
+                stop() {
+                    stopCurrent?.();
+                },
                 async play(id) {
                     const spec = __CHIME_SOUNDS[id];
                     if (spec === undefined)
@@ -274,38 +301,119 @@ window.__ModuleLoader__.load({
                         buffers.set(id, buffer);
                     }
                     const settings = readSettings();
+                    const windowMs = effectiveWindowMs(settings, buffer.duration * 1000, new Date());
+                    if (windowMs <= 0)
+                        return;
+                    // One ring at a time: a new chime replaces whatever is still playing, and
+                    // a long window is filled by replaying the clip until it runs out.
+                    stopCurrent?.();
                     const gain = audio.createGain();
                     gain.gain.value = Math.max(0, Math.min(1, settings.volume));
                     gain.connect(audio.destination);
-                    const windowSeconds = settings.durationMs > 0
-                        ? Math.min(settings.durationMs, MAX_WINDOW_MS) / 1000
-                        : buffer.duration;
-                    const stride = buffer.duration + REPEAT_GAP_SECONDS;
-                    const repeats = Math.max(1, Math.min(6, Math.ceil((windowSeconds + REPEAT_GAP_SECONDS) / stride)));
-                    const startAt = audio.currentTime + 0.01;
-                    let last;
-                    for (let index = 0; index < repeats; index += 1) {
-                        const offset = index * stride;
-                        if (offset >= windowSeconds)
-                            break;
-                        const source = audio.createBufferSource();
+                    let cancelled = false;
+                    let timer;
+                    let source;
+                    const deadline = Date.now() + windowMs;
+                    const finish = () => {
+                        if (cancelled)
+                            return;
+                        cancelled = true;
+                        if (timer !== undefined)
+                            clearTimeout(timer);
+                        timer = undefined;
+                        try {
+                            source?.stop();
+                        }
+                        catch {
+                            // Already ended.
+                        }
+                        source = undefined;
+                        try {
+                            gain.disconnect();
+                        }
+                        catch {
+                            // The context may already be gone; nothing to release.
+                        }
+                        if (stopCurrent === finish)
+                            stopCurrent = undefined;
+                    };
+                    stopCurrent = finish;
+                    const step = () => {
+                        if (cancelled)
+                            return;
+                        const remainingMs = deadline - Date.now();
+                        if (remainingMs <= 0) {
+                            finish();
+                            return;
+                        }
+                        const sliceSeconds = Math.min(buffer.duration, remainingMs / 1000);
+                        source = audio.createBufferSource();
                         source.buffer = buffer;
                         source.connect(gain);
-                        source.start(startAt + offset, 0, Math.min(buffer.duration, windowSeconds - offset));
-                        last = source;
-                    }
-                    if (last !== undefined) {
-                        last.onended = () => {
-                            try {
-                                gain.disconnect();
-                            }
-                            catch {
-                                // The context may already be gone; nothing to release.
-                            }
-                        };
-                    }
+                        source.start(0, 0, sliceSeconds);
+                        const nextMs = sliceSeconds * 1000 + REPEAT_GAP_SECONDS * 1000;
+                        timer = setTimeout(remainingMs > nextMs ? step : finish, remainingMs > nextMs ? nextMs : remainingMs + 20);
+                    };
+                    step();
                 },
             };
+        }
+        /**
+         * Minutes since local midnight for one `HH:mm` string.
+         * @param text - the clock text.
+         * @returns minutes, or null when the text is empty or malformed.
+         */
+        function parseClock(text) {
+            if (typeof text !== 'string')
+                return null;
+            const trimmed = text.trim();
+            if (!CLOCK.test(trimmed))
+                return null;
+            const [hours, minutes] = trimmed.split(':');
+            return Number(hours) * 60 + Number(minutes);
+        }
+        /**
+         * Whether the local time falls inside the configured do-not-disturb window.
+         *
+         * An empty, malformed or zero-length window is off. An end earlier than the
+         * start crosses midnight, which is the usual "22:00–08:00" case.
+         *
+         * @param now - the instant to test, in local time.
+         * @param startText - window start, `HH:mm`.
+         * @param endText - window end, `HH:mm`.
+         * @returns whether the window is active now.
+         */
+        function inQuietHours(now, startText, endText) {
+            const start = parseClock(startText);
+            const end = parseClock(endText);
+            if (start === null || end === null || start === end)
+                return false;
+            const minutes = now.getHours() * 60 + now.getMinutes();
+            return start < end ? minutes >= start && minutes < end : minutes >= start || minutes < end;
+        }
+        /**
+         * The playback window one chime gets right now, in milliseconds.
+         *
+         * Zero means "play nothing": either the master switch is off, or a quiet
+         * period is configured as silent. Inside a quiet period a `short` style caps
+         * the window at `quietShortMs`; otherwise the saved duration (or one full
+         * play-through when that is 0) applies.
+         *
+         * @param settings - resolved settings.
+         * @param clipMs - the chime's own length.
+         * @param now - the instant to test against the do-not-disturb window.
+         * @returns the playback window in milliseconds, 0 to skip the chime.
+         */
+        function effectiveWindowMs(settings, clipMs, now) {
+            if (!settings.enabled)
+                return 0;
+            const base = settings.durationMs > 0 ? Math.min(settings.durationMs, MAX_WINDOW_MS) : clipMs;
+            const quiet = settings.restMode || inQuietHours(now, settings.dndStart, settings.dndEnd);
+            if (!quiet)
+                return base;
+            if (settings.quietStyle === 'silent')
+                return 0;
+            return Math.min(base, settings.quietShortMs);
         }
         /** Parse a non-negative whole number of milliseconds. */
         function parseDuration(text) {
@@ -315,8 +423,8 @@ window.__ModuleLoader__.load({
             const value = Number(trimmed);
             if (!Number.isSafeInteger(value))
                 return { error: '这个时长超出可表示范围。' };
-            if (value > 600000)
-                return { error: '最长 600000 毫秒（10 分钟）。' };
+            if (value > MAX_WINDOW_MS)
+                return { error: '最长 21600000 毫秒（6 小时）。' };
             return { value };
         }
         /** Parse a 0–1 gain. */
@@ -325,6 +433,13 @@ window.__ModuleLoader__.load({
             if (!/^(0(\.\d+)?|1(\.0+)?)$/.test(trimmed))
                 return { error: '音量请填 0 到 1 之间的数，例如 0.8。' };
             return { value: Number(trimmed) };
+        }
+        /** Accept an empty string or a local `HH:mm` clock. */
+        function checkTime(text) {
+            const trimmed = text.trim();
+            if (trimmed === '' || CLOCK.test(trimmed))
+                return undefined;
+            return '请填 24 小时制的 HH:mm（例如 22:00），或留空表示不用。';
         }
         /** Read the chime choice list out of the generated sound table, in shipped order. */
         const SOUND_CHOICES = Object.keys(__CHIME_SOUNDS)
@@ -363,6 +478,35 @@ window.__ModuleLoader__.load({
                 min: 0, step: 100, parse: parseDuration,
                 seed: value => numberOf(value, 'debounceMs', 1500),
             },
+            {
+                key: 'quietStyle', kind: 'enum', label: '勿扰 / 休息时怎么响',
+                hint: '安静期间（勿扰时段或休息模式）把铃声缩短，还是完全静默。',
+                choices: [
+                    { value: 'short', label: '短响（用下面的短响时长）' },
+                    { value: 'silent', label: '不响（静默）' },
+                ],
+                seed: value => quietStyleOf(value),
+            },
+            {
+                key: 'quietShortMs', kind: 'number', label: '短响时长（毫秒）', hint: '安静期间“短响”用多长。默认 600。',
+                min: 0, step: 100, parse: parseDuration,
+                seed: value => numberOf(value, 'quietShortMs', 600),
+            },
+            {
+                key: 'dndStart', kind: 'time', label: '勿扰时段开始', hint: '本地时间 HH:mm，例如 22:00。留空、或与结束相同＝不启用勿扰时段。',
+                check: checkTime,
+                seed: value => clockOf(value, 'dndStart'),
+            },
+            {
+                key: 'dndEnd', kind: 'time', label: '勿扰时段结束', hint: '结束早于开始表示跨午夜（22:00 → 08:00）。',
+                check: checkTime,
+                seed: value => clockOf(value, 'dndEnd'),
+            },
+            {
+                key: 'restMode', kind: 'boolean', label: '休息模式',
+                hint: '打开后一直按上面的安静规则处理；也可以点侧边栏底部的按钮直接切换。',
+                seed: value => booleanOf(value, 'restMode', false),
+            },
         ];
         /** Field names in display order. */
         const FIELD_KEYS = FIELDS.map(field => field.key);
@@ -381,19 +525,35 @@ window.__ModuleLoader__.load({
             const raw = section(value)[key];
             return typeof raw === 'number' && Number.isFinite(raw) ? String(raw) : String(fallback);
         }
+        /** Read a quiet-period style, defaulting the way the host does. */
+        function quietStyleOf(value) {
+            const raw = section(value).quietStyle;
+            return raw === 'silent' ? 'silent' : 'short';
+        }
+        /** Read a local clock field, defaulting to "always" (empty). */
+        function clockOf(value, key) {
+            const raw = section(value)[key];
+            return typeof raw === 'string' && CLOCK.test(raw.trim()) ? raw.trim() : '';
+        }
         /** The settings the runtime applies, read from the accepted row snapshot. */
         function settingsOf(value) {
             const raw = section(value);
             const volume = raw.volume;
             const duration = raw.durationMs;
             const debounce = raw.debounceMs;
+            const short = raw.quietShortMs;
             return {
                 enabled: booleanOf(value, 'enabled', true),
                 soundDone: soundOf(value, 'soundDone', 'chime-soft'),
                 soundBlocked: soundOf(value, 'soundBlocked', 'alert-low'),
                 volume: typeof volume === 'number' && Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0.8,
-                durationMs: typeof duration === 'number' && Number.isSafeInteger(duration) && duration >= 0 ? duration : 0,
+                durationMs: typeof duration === 'number' && Number.isSafeInteger(duration) && duration >= 0 ? Math.min(duration, MAX_WINDOW_MS) : 0,
                 debounceMs: typeof debounce === 'number' && Number.isSafeInteger(debounce) && debounce >= 0 ? debounce : 1500,
+                quietStyle: quietStyleOf(value),
+                quietShortMs: typeof short === 'number' && Number.isSafeInteger(short) && short >= 0 ? Math.min(short, MAX_WINDOW_MS) : 600,
+                dndStart: clockOf(value, 'dndStart'),
+                dndEnd: clockOf(value, 'dndEnd'),
+                restMode: booleanOf(value, 'restMode', false),
             };
         }
         /**
@@ -463,6 +623,15 @@ window.__ModuleLoader__.load({
                             return { error: parsed.error };
                         if (parsed.value !== Number(seeded))
                             ops.push({ op: 'set', path: [field.key], value: parsed.value });
+                        continue;
+                    }
+                    if (field.kind === 'time') {
+                        const text = String(staged).trim();
+                        const problem = field.check?.(text);
+                        if (problem !== undefined)
+                            return { error: problem };
+                        if (text !== String(seeded))
+                            ops.push({ op: 'set', path: [field.key], value: text });
                         continue;
                     }
                     if (staged !== seeded)
@@ -577,6 +746,11 @@ window.__ModuleLoader__.load({
                 color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-3)',
             },
             error: { margin: 0, color: 'var(--dsw-alias-label-error)', lineHeight: 1.6 },
+            resting: {
+                padding: '7px 12px', border: '1px solid var(--dsw-alias-border-l2)',
+                borderRadius: 'var(--dsw-radius-md)', font: 'inherit',
+                color: 'var(--dsw-alias-label-secondary)', background: 'var(--dsw-alias-bg-layer-2)',
+            },
         };
         /** Short description shown on the plugin card while no editor is open. */
         const summary = '会话真正停下（无运行回合、无后台作业、无工作子代理）或目标受阻时响铃；铃声、音量与播放时长在这里设置。';
@@ -590,8 +764,11 @@ window.__ModuleLoader__.load({
             const form = ctx.configForms.get(ROW_ID);
             const audio = createAudio(() => settingsOf(form.getSnapshot().value));
             let latest = settingsOf(form.getSnapshot().value);
+            /** The sidebar switch reads this flag instead of the whole settings object. */
+            const restFlag = createFlag(booleanOf(form.getSnapshot().value, 'restMode', false));
             form.subscribe(() => {
                 latest = settingsOf(form.getSnapshot().value);
+                restFlag.set(latest.restMode);
             });
             const jobs = typeof ctx.get === 'function' ? ctx.get('jobs') : undefined;
             const releases = new Map();
@@ -653,14 +830,20 @@ window.__ModuleLoader__.load({
                     }
                 };
             }, 'dsh-session-chime: session watcher');
-            // Browsers keep audio suspended until the user interacts; every gesture retries.
-            const unlock = () => audio.unlock();
-            window.addEventListener('pointerdown', unlock, { capture: true, passive: true });
-            window.addEventListener('keydown', unlock, { capture: true, passive: true });
+            // Browsers keep audio suspended until the user interacts. Every gesture also
+            // stops a ringing chime: a long window is a legitimate setting, but the first
+            // click or key press means the human is back and has heard it.
+            const onGesture = () => {
+                audio.unlock();
+                audio.stop();
+            };
+            window.addEventListener('pointerdown', onGesture, { capture: true, passive: true });
+            window.addEventListener('keydown', onGesture, { capture: true, passive: true });
             ctx.effect(() => () => {
-                window.removeEventListener('pointerdown', unlock, { capture: true });
-                window.removeEventListener('keydown', unlock, { capture: true });
-            }, 'dsh-session-chime: audio unlock');
+                window.removeEventListener('pointerdown', onGesture, { capture: true });
+                window.removeEventListener('keydown', onGesture, { capture: true });
+                audio.stop();
+            }, 'dsh-session-chime: audio unlock and stop-on-gesture');
             const h = React.createElement;
             function EditorView({ configForm }) {
                 const [instance] = React.useState(() => createEditor(configForm));
@@ -688,6 +871,13 @@ window.__ModuleLoader__.load({
                             'aria-describedby': id + '-hint',
                             onChange: (event) => instance.edit(spec.key, event.target.value),
                         }, (spec.choices ?? []).map(choice => h('option', { key: choice.value, value: choice.value }, choice.label))), h('p', { id: id + '-hint', style: styles.hint }, spec.hint));
+                    }
+                    if (spec.kind === 'time') {
+                        return h('div', { key: spec.key, style: styles.field }, h('label', { htmlFor: id, style: styles.label }, spec.label), h('input', {
+                            id, type: 'time', style: styles.number, value: String(value), disabled,
+                            'aria-describedby': id + '-hint',
+                            onChange: (event) => instance.edit(spec.key, event.target.value),
+                        }), h('p', { id: id + '-hint', style: styles.hint }, spec.hint));
                     }
                     return h('div', { key: spec.key, style: styles.field }, h('label', { htmlFor: id, style: styles.label }, spec.label), h('input', {
                         id, type: 'number', min: spec.min, max: spec.max, step: spec.step, inputMode: 'decimal',
@@ -720,6 +910,38 @@ window.__ModuleLoader__.load({
                 key: BUNDLE_ID + '#' + ROW_ID,
                 inject: () => ({ configForm: form }),
             }, ConfigView))), 'dsh-session-chime: configuration page');
+            /** Flip rest mode straight from the sidebar switch. */
+            async function toggleRestMode() {
+                const snapshot = form.getSnapshot();
+                if (snapshot.status !== 'ready' || !snapshot.writable)
+                    return;
+                const next = !booleanOf(snapshot.value, 'restMode', false);
+                try {
+                    await form.mutate([{ op: 'set', path: ['restMode'], value: next }], snapshot.revision);
+                }
+                catch {
+                    // The settings page reports write failures; the switch simply stays put.
+                }
+            }
+            /** The sidebar-foot switch: one click between working and resting. */
+            function RestModeSwitch({ wide }) {
+                const resting = React.useSyncExternalStore(restFlag.subscribe, restFlag.getSnapshot, restFlag.getSnapshot);
+                return h('button', {
+                    type: 'button',
+                    style: resting ? styles.resting : styles.button,
+                    title: resting ? '休息模式：安静中，点击恢复正常' : '工作模式：正常响铃，点击进入休息',
+                    'aria-pressed': resting === true,
+                    onClick: () => {
+                        void toggleRestMode();
+                    },
+                }, resting ? (wide === false ? '🌙' : '🌙 休息中') : (wide === false ? '🔔' : '🔔 正常'));
+            }
+            ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+                name: 'sidebar.footer.action',
+                id: 'session-chime-rest',
+                order: 50,
+                label: () => '休息模式',
+            }, RestModeSwitch)), 'dsh-session-chime: rest-mode switch');
         }
         // The shell reads named exports off the factory result, exactly like the
         // Harness' own client bundles, so the shape is an explicit namespace object.
@@ -733,6 +955,10 @@ window.__ModuleLoader__.load({
         exported.settingsOf = settingsOf;
         exported.parseDuration = parseDuration;
         exported.parseVolume = parseVolume;
+        exported.parseClock = parseClock;
+        exported.inQuietHours = inQuietHours;
+        exported.effectiveWindowMs = effectiveWindowMs;
+        exported.checkTime = checkTime;
         exported.summary = summary;
         exported.ROW_ID = ROW_ID;
         exported.FIELDS = FIELDS.map(field => field.key);

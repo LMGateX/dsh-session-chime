@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-chime",
-  "version": "0.1.0",
-  "description": "Session completion chimes for DSH: ring when an agent truly stops — no running turn, no live background job, no working subagent",
+  "version": "0.2.0",
+  "description": "DSH plugin: ring when a session truly stops (no running turn, no live job, no working subagent), with do-not-disturb windows and rest mode",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LMGateX/dsh-session-chime.git"

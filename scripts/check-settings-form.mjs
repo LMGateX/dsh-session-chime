@@ -23,7 +23,7 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = dirname(dirname(new URL(import.meta.url).pathname))
-const EXPECTED_FIELDS = ['enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs']
+const EXPECTED_FIELDS = ['enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs', 'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode']
 const EXPECTED_SOUNDS = ['chime-soft', 'bell-bright', 'marimba', 'alert-low', 'alert-sharp', 'blip']
 const failures = []
 const check = (ok, message) => {
@@ -121,13 +121,21 @@ if (fiber !== undefined) {
       check(node('enabled').meta?.default === true, 'enabled default is ' + JSON.stringify(node('enabled').meta?.default))
       check(node('volume').meta?.default === 0.8, 'volume default is ' + JSON.stringify(node('volume').meta?.default))
       check(node('debounceMs').meta?.default === 1500, 'debounceMs default is ' + JSON.stringify(node('debounceMs').meta?.default))
+      check(node('quietStyle').type === 'union', 'quietStyle is not a union but ' + JSON.stringify(node('quietStyle').type))
+      check(JSON.stringify((node('quietStyle').list ?? []).map(id => json.refs[id]?.value)) === JSON.stringify(['short', 'silent']), 'quietStyle choices are wrong')
+      check(node('quietStyle').meta?.default === 'short', 'quietStyle default is ' + JSON.stringify(node('quietStyle').meta?.default))
+      check(node('quietShortMs').meta?.default === 600, 'quietShortMs default is ' + JSON.stringify(node('quietShortMs').meta?.default))
+      check(node('dndStart').meta?.default === '', 'dndStart default is ' + JSON.stringify(node('dndStart').meta?.default))
+      check(node('dndEnd').meta?.default === '', 'dndEnd default is ' + JSON.stringify(node('dndEnd').meta?.default))
+      check(node('restMode').meta?.default === false, 'restMode default is ' + JSON.stringify(node('restMode').meta?.default))
       console.log(JSON.stringify({
         ns: row.ns,
         applies: row.applies,
         liveVolatile: volatile,
         describedFields: fields,
         soundChoices: (node('soundDone').list ?? []).map(id => json.refs[id]?.value),
-        defaults: Object.fromEntries(['enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs'].map(field => [field, node(field).meta?.default])),
+        quietChoices: (node('quietStyle').list ?? []).map(id => json.refs[id]?.value),
+        defaults: Object.fromEntries(EXPECTED_FIELDS.map(field => [field, node(field).meta?.default])),
       }, null, 2))
     }
 
@@ -149,7 +157,7 @@ if (failures.length > 0) {
   for (const failure of failures) console.error('  - ' + failure)
   process.exit(1)
 }
-console.log('OK: the host settings service describes a live "session-chime" namespace with all six volatile fields,')
+console.log('OK: the host settings service describes a live "session-chime" namespace with all eleven volatile fields,')
 console.log('    both chime unions and the shipped defaults; a saved chime passes the volatility check on the write path.')
 
 /** Resolve the dsh installation package.json behind the configured executable. */

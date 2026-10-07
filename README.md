@@ -41,10 +41,32 @@ dsh profile install https://github.com/LMGateX/dsh-session-chime/releases/downlo
 | `soundDone` | `chime-soft` | 完成铃声，6 个可选 |
 | `soundBlocked` | `alert-low` | 受阻铃声，6 个可选 |
 | `volume` | `0.8` | 音量 0–1 |
-| `durationMs` | `0` | 播放时长上限；0＝完整播一次，正数＝最多响这么久（短铃声自动重复，上限 8 秒） |
+| `durationMs` | `0` | 播放时长上限；0＝完整播一次，正数＝最多响这么久（短铃声按间隔重复到时长用完，**上限 6 小时**） |
 | `debounceMs` | `1500` | 安静判定：停下后要安静这么久才算结束，用来躲开回合间隙 |
+| `quietStyle` | `short` | 勿扰/休息时怎么响：`short` 短响、`silent` 不响 |
+| `quietShortMs` | `600` | 安静期间"短响"的时长 |
+| `dndStart` | 空 | 勿扰时段开始（本地时间 `HH:mm`），留空＝不启用 |
+| `dndEnd` | 空 | 勿扰时段结束；结束早于开始表示跨午夜（`22:00`→`08:00`） |
+| `restMode` | `false` | 休息模式：一直按上面的安静规则处理 |
 
 六个铃声（全部 CC0，来自 Kenney "Interface Sounds"）：`chime-soft` 柔和双音、`bell-bright` 清脆铃、`marimba` 木琴上行、`alert-low` 低沉警示、`alert-sharp` 短促警示、`blip` 轻点。设置页里点击 **试听完成音** 可以直接听。
+
+## 安静规则与休息模式
+
+两种"现在别吵我"的来源，规则一样（由 `quietStyle` 决定）：
+
+- **勿扰时段**：`dndStart`–`dndEnd`，本地时间 `HH:mm`，可以跨午夜（`22:00` → `08:00`）。留空、或开始与结束相同＝不启用。判定用**浏览器所在机器的本地时间**，因为声音是它放的。
+- **休息模式**：一键开关，等价于"一直处于勿扰时段"。设置页里有复选框，**侧边栏底部也有一枚 🌙/🔔 按钮**（工作 ⇄ 休息），点一下就写入配置、立即生效。
+
+安静期间 `short`＝只响 `quietShortMs`（默认 600ms），`silent`＝完全不响。
+
+## 长响铃怎么停
+
+`durationMs` 可以设到 6 小时——短铃声会按 ~120ms 间隔重复到时长用完。这么长的响铃当然要能停：
+
+- **点一下页面或按任意键就停**（这一下同时解锁浏览器音频，是同一个手势监听）；
+- 设置页的"试听完成音"按钮重新试听；
+- 新的铃声会顶掉正在响的那一个（同一时刻只有一声）。
 
 ## 浏览器音频的两条现实约束
 
@@ -68,18 +90,18 @@ npm run build        # lib/ + client/client.js
 
 仓库结构：
 
-- `src/config.ts` — 设置页渲染的 Schemastery schema（六个字段全部 volatile）。
+- `src/config.ts` — 设置页渲染的 Schemastery schema（十一个字段全部 volatile）。
 - `src/index.ts` — host 半边：只发布 schema，不挂任何监听、不起定时器。
 - `client/main.ts` — 浏览器半边：会话监听、判定、播放、设置表单。
 - `client/sounds.generated.js` — 由 `scripts/generate-sounds.ts` 生成的声音表（base64 WAV）。
 - `scripts/build-client.mjs` — 把声音表与编译后的 `client/main.js` 拼成一个 classic script `client/client.js`。
-- `scripts/check-settings-form.mjs` — 用**真实安装的** `@deepseek-ai/dsh-settings` 跑 `describe()`，证明插件页会渲染出这六个控件。
+- `scripts/check-settings-form.mjs` — 用**真实安装的** `@deepseek-ai/dsh-settings` 跑 `describe()`，证明插件页会渲染出这十一个控件。
 
 ## English
 
 A DSH plugin that rings when a session **truly stops**: no running turn, no live background job owned by that session, and no working subagent. A goal that becomes `blocked` counts as a stop and can use its own chime. All top-level sessions of the instance are watched (subagent sessions never ring on their own).
 
-Chimes, volume, playback window and the quiet-period threshold are set on the plugin's settings page and apply live. The chimes are CC0 Kenney interface sounds bundled into the browser half, so playback is offline and happens in the browser: closing the page ends the ringing. Browsers need one user gesture before they allow audio, so the first `pointerdown`/`keydown` (or the page's 试听 button) unlocks the context.
+Chimes, volume, the playback window (up to 6 hours; a short chime repeats until the window is used up, and any click or key press stops it), the quiet-period threshold, a local-time do-not-disturb window (which may cross midnight) and a one-click rest mode are set on the plugin's settings page and apply live; rest mode also has a 🌙/🔔 switch at the sidebar foot. The chimes are CC0 Kenney interface sounds bundled into the browser half, so playback is offline and happens in the browser: closing the page ends the ringing. Browsers need one user gesture before they allow audio, so the first `pointerdown`/`keydown` (or the page's 试听 button) unlocks the context.
 
 Not published to npm; install from the GitHub Release tarball.
 

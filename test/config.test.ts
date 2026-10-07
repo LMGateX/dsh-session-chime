@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Config, resolveRowConfig, soundIds, type SoundId } from '../src/config.ts';
+import { Config, MAX_DURATION_MS, resolveRowConfig, soundIds, type SoundId } from '../src/config.ts';
 
 test('defaults match the shipped chime set', () => {
   const resolved = resolveRowConfig();
@@ -15,6 +15,11 @@ test('defaults match the shipped chime set', () => {
     volume: 0.8,
     durationMs: 0,
     debounceMs: 1500,
+    quietStyle: 'short',
+    quietShortMs: 600,
+    dndStart: '',
+    dndEnd: '',
+    restMode: false,
   });
 });
 
@@ -45,8 +50,28 @@ test('bad values name the offending field', () => {
   assert.throws(() => resolveRowConfig({ soundDone: 'bell' } as never), /soundDone must be one of/);
   assert.throws(() => resolveRowConfig({ enabled: 'yes' } as never), /enabled must be a boolean/);
   assert.throws(() => resolveRowConfig({ volume: 1.5 } as never), /volume must be a number between 0 and 1/);
-  assert.throws(() => resolveRowConfig({ durationMs: -1 } as never), /durationMs must be a non-negative whole number/);
-  assert.throws(() => resolveRowConfig({ debounceMs: 1.5 } as never), /debounceMs must be a non-negative whole number/);
+  assert.throws(() => resolveRowConfig({ durationMs: -1 } as never), /durationMs must be a whole number of milliseconds between 0 and/);
+  assert.throws(() => resolveRowConfig({ debounceMs: 1.5 } as never), /debounceMs must be a whole number of milliseconds between 0 and/);
+  assert.throws(() => resolveRowConfig({ quietStyle: 'loud' } as never), /quietStyle must be one of short, silent/);
+  assert.throws(() => resolveRowConfig({ dndStart: '25:00' } as never), /dndStart must be an empty string or a local HH:mm time/);
+  assert.throws(() => resolveRowConfig({ dndEnd: '8:00' } as never), /dndEnd must be an empty string or a local HH:mm time/);
+  assert.throws(() => resolveRowConfig({ restMode: 'yes' } as never), /restMode must be a boolean/);
+});
+
+test('duration fields accept hours but refuse a typo-driven week', () => {
+  assert.equal(resolveRowConfig({ durationMs: 60_000 }).durationMs, 60_000);
+  assert.equal(resolveRowConfig({ durationMs: MAX_DURATION_MS }).durationMs, MAX_DURATION_MS);
+  assert.equal(resolveRowConfig({ quietShortMs: 30_000 }).quietShortMs, 30_000);
+  assert.throws(() => resolveRowConfig({ durationMs: MAX_DURATION_MS + 1 } as never), /durationMs must be a whole number of milliseconds between 0 and/);
+  assert.throws(() => resolveRowConfig({ quietShortMs: MAX_DURATION_MS + 1 } as never), /quietShortMs must be a whole number/);
+});
+
+test('quiet-period style and clock values pass through', () => {
+  const resolved = resolveRowConfig({ quietStyle: 'silent', dndStart: '22:00', dndEnd: '08:00', restMode: true });
+  assert.equal(resolved.quietStyle, 'silent');
+  assert.equal(resolved.dndStart, '22:00');
+  assert.equal(resolved.dndEnd, '08:00');
+  assert.equal(resolved.restMode, true);
 });
 
 test('the schema is a Schemastery node and knows every chime', () => {

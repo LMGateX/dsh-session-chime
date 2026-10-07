@@ -29,6 +29,10 @@ interface ClientApi {
   settingsOf(value: unknown): Record<string, unknown>;
   parseDuration(text: string): { value?: number; error?: string };
   parseVolume(text: string): { value?: number; error?: string };
+  parseClock(text: unknown): number | null;
+  inQuietHours(now: Date, start: string, end: string): boolean;
+  effectiveWindowMs(settings: Record<string, unknown>, clipMs: number, now: Date): number;
+  checkTime(text: string): string | undefined;
   ROW_ID: string;
   FIELDS: string[];
   SOUND_IDS: string[];
@@ -257,11 +261,15 @@ test('the editor seeds, stages, and saves one fenced mutation', async () => {
   assert.equal(editor.getSnapshot().values.soundDone, 'chime-soft');
   editor.edit('soundDone', 'marimba');
   editor.edit('durationMs', '3000');
+  editor.edit('dndStart', '22:00');
+  editor.edit('restMode', true);
   assert.equal(editor.getSnapshot().dirty, true);
   assert.equal(await editor.save(), true);
   assert.deepEqual(operations, [[
     { op: 'set', path: ['soundDone'], value: 'marimba' },
     { op: 'set', path: ['durationMs'], value: 3000 },
+    { op: 'set', path: ['dndStart'], value: '22:00' },
+    { op: 'set', path: ['restMode'], value: true },
   ]]);
 });
 
@@ -281,7 +289,7 @@ test('reset submits unsets for every field', async () => {
   editor.start();
   editor.reset();
   await editor.save();
-  assert.deepEqual(operations[0]?.map(op => op.op), ['unset', 'unset', 'unset', 'unset', 'unset', 'unset']);
+  assert.deepEqual(operations[0]?.map(op => op.op), new Array(client.FIELDS.length).fill('unset'));
 });
 
 test('settingsOf falls back to the shipped defaults on junk', () => {
@@ -289,6 +297,67 @@ test('settingsOf falls back to the shipped defaults on junk', () => {
   assert.equal(client.settingsOf({ soundDone: 'nope' }).soundDone, 'chime-soft');
   assert.equal(client.settingsOf({ volume: 9 }).volume, 1);
   assert.equal(client.settingsOf({ debounceMs: -1 }).debounceMs, 1500);
+  assert.equal(client.settingsOf({ quietStyle: 'shout' }).quietStyle, 'short');
+  assert.equal(client.settingsOf({ dndStart: '25:00' }).dndStart, '');
+  assert.equal(client.settingsOf({ restMode: 'yes' }).restMode, false);
+});
+
+test('parseClock reads a 24-hour local time', () => {
+  assert.equal(client.parseClock('00:00'), 0);
+  assert.equal(client.parseClock('22:30'), 22 * 60 + 30);
+  assert.equal(client.parseClock(' 08:00 '), 480);
+  assert.equal(client.parseClock('24:00'), null);
+  assert.equal(client.parseClock('8:00'), null);
+  assert.equal(client.parseClock(''), null);
+  assert.equal(client.parseClock(undefined), null);
+});
+
+test('the do-not-disturb window handles same-day and cross-midnight spans', () => {
+  const at = (hours: number, minutes = 0) => new Date(2026, 0, 1, hours, minutes, 0);
+  // 13:00–14:00, same day.
+  assert.equal(client.inQuietHours(at(12, 59), '13:00', '14:00'), false);
+  assert.equal(client.inQuietHours(at(13, 0), '13:00', '14:00'), true);
+  assert.equal(client.inQuietHours(at(13, 59), '13:00', '14:00'), true);
+  assert.equal(client.inQuietHours(at(14, 0), '13:00', '14:00'), false);
+  // 22:00–08:00 crosses midnight.
+  assert.equal(client.inQuietHours(at(23), '22:00', '08:00'), true);
+  assert.equal(client.inQuietHours(at(3), '22:00', '08:00'), true);
+  assert.equal(client.inQuietHours(at(12), '22:00', '08:00'), false);
+  // Empty or zero-length windows are off.
+  assert.equal(client.inQuietHours(at(23), '', '08:00'), false);
+  assert.equal(client.inQuietHours(at(23), '22:00', ''), false);
+  assert.equal(client.inQuietHours(at(23), '22:00', '22:00'), false);
+});
+
+test('effectiveWindowMs applies the master switch and the quiet rules', () => {
+  const at = (hours: number) => new Date(2026, 0, 1, hours, 0, 0);
+  const base = {
+    enabled: true, soundDone: 'chime-soft', soundBlocked: 'alert-low', volume: 0.8,
+    durationMs: 0, debounceMs: 1500, quietStyle: 'short', quietShortMs: 400,
+    dndStart: '', dndEnd: '', restMode: false,
+  };
+  // 0 duration = one full play-through.
+  assert.equal(client.effectiveWindowMs(base, 500, at(12)), 500);
+  assert.equal(client.effectiveWindowMs({ ...base, durationMs: 60_000 }, 500, at(12)), 60_000);
+  // Master switch off wins over everything.
+  assert.equal(client.effectiveWindowMs({ ...base, enabled: false }, 500, at(12)), 0);
+  // Rest mode shortens to quietShortMs, silence drops the chime entirely.
+  assert.equal(client.effectiveWindowMs({ ...base, restMode: true }, 500, at(12)), 400);
+  assert.equal(client.effectiveWindowMs({ ...base, restMode: true, quietStyle: 'silent' }, 500, at(12)), 0);
+  // A short quiet window never stretches a longer request.
+  assert.equal(client.effectiveWindowMs({ ...base, restMode: true, durationMs: 60_000 }, 500, at(12)), 400);
+  assert.equal(client.effectiveWindowMs({ ...base, restMode: true, durationMs: 200 }, 500, at(12)), 200);
+  // The do-not-disturb window behaves exactly like rest mode while it is active.
+  const dnd = { ...base, dndStart: '22:00', dndEnd: '08:00' };
+  assert.equal(client.effectiveWindowMs(dnd, 500, at(23)), 400);
+  assert.equal(client.effectiveWindowMs(dnd, 500, at(12)), 500);
+});
+
+test('the time field accepts an empty string or HH:mm only', () => {
+  assert.equal(client.checkTime(''), undefined);
+  assert.equal(client.checkTime('07:05'), undefined);
+  assert.match(String(client.checkTime('7:05')), /HH:mm/);
+  assert.match(String(client.checkTime('25:00')), /HH:mm/);
 });
 
 test('parse helpers reject junk', () => {
@@ -301,5 +370,8 @@ test('parse helpers reject junk', () => {
 test('the bundle declares its row and the shipped chime set', () => {
   assert.equal(client.ROW_ID, 'session-chime');
   assert.deepEqual(client.SOUND_IDS, ['chime-soft', 'bell-bright', 'marimba', 'alert-low', 'alert-sharp', 'blip']);
-  assert.deepEqual(client.FIELDS, ['enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs']);
+  assert.deepEqual(client.FIELDS, [
+    'enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs',
+    'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode',
+  ]);
 });

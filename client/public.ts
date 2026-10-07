@@ -75,6 +75,16 @@ export interface JobsService {
   watchRows(sessionId: string): () => void
 }
 
+/** One slot registration option bag. */
+export interface SlotRegistration {
+  readonly name: string
+  readonly key?: string
+  readonly id?: string
+  readonly order?: number
+  readonly label?: string | (() => string)
+  readonly inject?: () => Record<string, unknown>
+}
+
 /** The slice of the client Cordis context this bundle touches. */
 export interface ClientContext {
   readonly configForms: {
@@ -84,7 +94,7 @@ export interface ClientContext {
   }
   readonly slots: {
     inject(name: string, register: () => unknown): unknown
-    register(options: Record<string, unknown>, component: unknown): unknown
+    register(options: SlotRegistration, component: unknown): unknown
   }
   effect(callback: () => unknown, label: string): unknown
   readonly sessions: SessionsService
@@ -102,6 +112,9 @@ export interface ReactRuntime {
 /** Why a chime played. */
 export type ChimeReason = 'done' | 'blocked'
 
+/** What a quiet period does with a chime. */
+export type QuietStyle = 'short' | 'silent'
+
 /** Resolved chime settings, as the browser half applies them. */
 export interface ChimeSettings {
   readonly enabled: boolean
@@ -110,10 +123,18 @@ export interface ChimeSettings {
   readonly volume: number
   readonly durationMs: number
   readonly debounceMs: number
+  readonly quietStyle: QuietStyle
+  readonly quietShortMs: number
+  readonly dndStart: string
+  readonly dndEnd: string
+  readonly restMode: boolean
 }
 
 /** Shipped chime ids, mirrored by src/config.ts and asserted by npm run check:bundle. */
 export const SOUND_IDS: readonly string[] = ['chime-soft', 'bell-bright', 'marimba', 'alert-low', 'alert-sharp', 'blip']
+
+/** Upper bound for every duration field, mirroring src/config.ts. */
+export const MAX_DURATION_MS = 6 * 60 * 60 * 1000
 
 /** Default settings, mirroring the host schema defaults. */
 export const DEFAULT_SETTINGS: ChimeSettings = {
@@ -123,4 +144,9 @@ export const DEFAULT_SETTINGS: ChimeSettings = {
   volume: 0.8,
   durationMs: 0,
   debounceMs: 1500,
+  quietStyle: 'short',
+  quietShortMs: 600,
+  dndStart: '',
+  dndEnd: '',
+  restMode: false,
 }

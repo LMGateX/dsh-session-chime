@@ -26,6 +26,24 @@ export const soundIds = ['chime-soft', 'bell-bright', 'marimba', 'alert-low', 'a
 /** One shipped chime. */
 export type SoundId = (typeof soundIds)[number]
 
+/** How a quiet period (do-not-disturb window, rest mode) treats a chime. */
+export const quietStyles = ['short', 'silent'] as const
+
+/** One quiet-period style. */
+export type QuietStyle = (typeof quietStyles)[number]
+
+/**
+ * Upper bound for any duration field: six hours.
+ *
+ * A long ring is a legitimate choice — it repeats the chime until the window
+ * elapses and stops on the next click or key press — so the cap is only there to
+ * keep a typo from ringing for a week.
+ */
+export const MAX_DURATION_MS = 6 * 60 * 60 * 1000
+
+/** `HH:mm` in 24-hour local time, or the empty string for "always". */
+const CLOCK = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+
 /** One configuration field as the loader may hand it over: a plain value or a volatile accessor. */
 export type Live<T> = T | { get(): T }
 
@@ -43,6 +61,16 @@ export interface RowConfig {
   readonly durationMs?: Live<number>
   /** How long a session must stay quiet before it counts as settled. */
   readonly debounceMs?: Live<number>
+  /** What a quiet period does: shorten the chime or drop it. */
+  readonly quietStyle?: Live<QuietStyle>
+  /** Playback window used inside a quiet period when `quietStyle` is `short`. */
+  readonly quietShortMs?: Live<number>
+  /** Do-not-disturb window start (`HH:mm`, local time); empty disables the window. */
+  readonly dndStart?: Live<string>
+  /** Do-not-disturb window end (`HH:mm`, local time); empty disables the window. */
+  readonly dndEnd?: Live<string>
+  /** Rest mode: treat every chime as if it were inside the do-not-disturb window. */
+  readonly restMode?: Live<boolean>
 }
 
 /** Plain row configuration, as tests and hand-written compositions pass it. */
@@ -59,6 +87,16 @@ export interface RowConfigInput {
   readonly durationMs?: number
   /** How long a session must stay quiet before it counts as settled. */
   readonly debounceMs?: number
+  /** What a quiet period does: shorten the chime or drop it. */
+  readonly quietStyle?: QuietStyle
+  /** Playback window used inside a quiet period when `quietStyle` is `short`. */
+  readonly quietShortMs?: number
+  /** Do-not-disturb window start (`HH:mm`, local time); empty disables the window. */
+  readonly dndStart?: string
+  /** Do-not-disturb window end (`HH:mm`, local time); empty disables the window. */
+  readonly dndEnd?: string
+  /** Rest mode: treat every chime as if it were inside the do-not-disturb window. */
+  readonly restMode?: boolean
 }
 
 /** Validated row configuration with every default applied. */
@@ -69,10 +107,18 @@ export interface ResolvedRowConfig {
   readonly volume: number
   readonly durationMs: number
   readonly debounceMs: number
+  readonly quietStyle: QuietStyle
+  readonly quietShortMs: number
+  readonly dndStart: string
+  readonly dndEnd: string
+  readonly restMode: boolean
 }
 
 /** Configuration keys this row accepts; anything else is a composition error. */
-export const knownRowKeys: readonly string[] = ['enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs']
+export const knownRowKeys: readonly string[] = [
+  'enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs',
+  'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode',
+]
 
 /**
  * Read one field, unwrapping the volatile accessor when the loader provided one.
@@ -118,12 +164,35 @@ export const Config = Schema.object({
     ' Output gain, 0–1; applies from the next chime.',
   )),
   durationMs: live(Schema.natural().default(0).description(
-    '播放时长上限（毫秒）。0＝每声完整播放一次；正数＝最多响这么久，铃声较短时自动重复（上限 8 秒）。' +
-    ' Longest playback window in ms; 0 plays each chime exactly once, a positive value repeats a short chime up to that window (capped at 8 s).',
+    '播放时长上限（毫秒，最大 21600000＝6 小时）。0＝每声完整播放一次；正数＝最多响这么久，短铃声按间隔重复到时长用完为止。' +
+    ' Longest playback window in ms (max 21600000 = 6 h). 0 plays each chime exactly once; a positive value repeats a short chime until the window is used up.',
   )),
   debounceMs: live(Schema.natural().default(1500).description(
     '安静判定（毫秒）：会话停止后需要安静这么久才判定为“结束”，用来躲开回合之间的间隙。' +
     ' How long a session must stay quiet before it counts as settled; this is what keeps inter-round gaps silent.',
+  )),
+  quietStyle: live(Schema.union([
+    Schema.const('short').description('短响：只响 quietShortMs 那么久。 Shorten the chime to quietShortMs.'),
+    Schema.const('silent').description('不响：静默，什么都不播。 Stay silent.'),
+  ]).default('short').description(
+    '勿扰时段与休息模式下怎么处理提示音。' +
+    ' What a quiet period (do-not-disturb window or rest mode) does with a chime. Default: short.',
+  )),
+  quietShortMs: live(Schema.natural().default(600).description(
+    '安静期间“短响”的时长（毫秒）。' +
+    ' Playback window used inside a quiet period when the style is “short” (ms).',
+  )),
+  dndStart: live(Schema.string().default('').description(
+    '勿扰时段开始（本地时间 HH:mm，例如 22:00）。留空表示不用勿扰时段；开始与结束相同也视为关闭。' +
+    ' Do-not-disturb window start (local HH:mm, e.g. 22:00). Empty disables it; equal start and end also disables it.',
+  )),
+  dndEnd: live(Schema.string().default('').description(
+    '勿扰时段结束（本地时间 HH:mm，例如 08:00）。结束早于开始表示跨午夜。' +
+    ' Do-not-disturb window end (local HH:mm, e.g. 08:00). An end earlier than the start crosses midnight.',
+  )),
+  restMode: live(Schema.boolean().default(false).description(
+    '休息模式：打开后等同于一直处于勿扰时段（按上面的方式短响或静默）；这个开关也可以从侧边栏底部的按钮直接切换。' +
+    ' Rest mode: while on, every chime is treated as inside the do-not-disturb window. The sidebar footer button toggles it directly.',
   )),
 })
 
@@ -138,15 +207,18 @@ export function resolveRowConfig(config: RowConfig | RowConfigInput = {}): Resol
   for (const key of Object.keys(config)) {
     if (!knownRowKeys.includes(key)) throw new Error(`session-chime: unknown configuration option "${key}"`)
   }
-  const enabled = optionalBoolean('enabled', liveValue(config.enabled)) ?? true
-  const volume = optionalUnit('volume', liveValue(config.volume)) ?? 0.8
   return {
-    enabled,
+    enabled: optionalBoolean('enabled', liveValue(config.enabled)) ?? true,
     soundDone: optionalSound('soundDone', liveValue(config.soundDone)) ?? 'chime-soft',
     soundBlocked: optionalSound('soundBlocked', liveValue(config.soundBlocked)) ?? 'alert-low',
-    volume,
+    volume: optionalUnit('volume', liveValue(config.volume)) ?? 0.8,
     durationMs: optionalDuration('durationMs', liveValue(config.durationMs)) ?? 0,
     debounceMs: optionalDuration('debounceMs', liveValue(config.debounceMs)) ?? 1500,
+    quietStyle: optionalQuietStyle(liveValue(config.quietStyle)) ?? 'short',
+    quietShortMs: optionalDuration('quietShortMs', liveValue(config.quietShortMs)) ?? 600,
+    dndStart: optionalClock('dndStart', liveValue(config.dndStart)) ?? '',
+    dndEnd: optionalClock('dndEnd', liveValue(config.dndEnd)) ?? '',
+    restMode: optionalBoolean('restMode', liveValue(config.restMode)) ?? false,
   }
 }
 
@@ -164,6 +236,14 @@ function optionalSound(field: string, value: unknown): SoundId | undefined {
   return value as SoundId
 }
 
+function optionalQuietStyle(value: unknown): QuietStyle | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !(quietStyles as readonly string[]).includes(value)) {
+    throw new Error(`session-chime: quietStyle must be one of ${quietStyles.join(', ')}`)
+  }
+  return value as QuietStyle
+}
+
 function optionalUnit(field: string, value: unknown): number | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
@@ -174,8 +254,16 @@ function optionalUnit(field: string, value: unknown): number | undefined {
 
 function optionalDuration(field: string, value: unknown): number | undefined {
   if (value === undefined) return undefined
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`session-chime: ${field} must be a non-negative whole number of milliseconds`)
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > MAX_DURATION_MS) {
+    throw new Error(`session-chime: ${field} must be a whole number of milliseconds between 0 and ${MAX_DURATION_MS}`)
+  }
+  return value
+}
+
+function optionalClock(field: string, value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || (value !== '' && !CLOCK.test(value))) {
+    throw new Error(`session-chime: ${field} must be an empty string or a local HH:mm time`)
   }
   return value
 }
