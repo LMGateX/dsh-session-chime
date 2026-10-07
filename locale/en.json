@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session chime",
+    "description": "Ring when a session truly stops. The test is complete quiescence: no running turn, no live background job owned by that session and no working subagent — so an agent merely waiting on background work stays silent; a goal that becomes blocked counts as a stop and can use its own chime. Every top-level session of the instance is watched (subagent sessions never ring on their own). All fields are volatile: a saved change applies at once, with no restart and no remount of this row. The chimes are CC0 Kenney interface sounds bundled with the plugin, so they work offline; playback happens in the browser, so closing the page ends the ringing."
+  }
+}

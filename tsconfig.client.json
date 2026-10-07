@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Emit beside the sources: client/main.ts -> client/main.js, client/public.ts ->
+    // client/public.js. The served bundle (client/client.js) is then assembled by
+    // scripts/build-client.mjs from the compiled body plus the generated sound table.
+    "outDir": ".",
+    "rootDir": ".",
+    // The browser half is injected as a classic script and concatenated with other
+    // bundles, so it must compile as a script: no ESM syntax, no `export {}` marker.
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2024", "DOM"],
+    "declaration": true,
+    "declarationMap": false,
+    "noEmit": false,
+    "types": []
+  },
+  // An explicit exclude replaces the default one, which would otherwise exclude the
+  // outDir (the project root) and leave the project with no inputs.
+  "exclude": ["node_modules", "lib", "test", "scripts"],
+  "include": ["client/**/*.ts"]
+}

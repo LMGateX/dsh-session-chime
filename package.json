@@ -1,0 +1,79 @@
+{
+  "name": "dsh-session-chime",
+  "version": "0.1.0",
+  "description": "Session completion chimes for DSH: ring when an agent truly stops — no running turn, no live background job, no working subagent",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LMGateX/dsh-session-chime.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LMGateX/dsh-session-chime/issues"
+  },
+  "homepage": "https://github.com/LMGateX/dsh-session-chime#readme",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./client/public.d.ts",
+      "default": "./client/client.js"
+    },
+    "./client-types": {
+      "types": "./client/public.d.ts",
+      "default": "./client/public.js"
+    },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "locale",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "src",
+    "scripts",
+    "assets"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "gen:sounds": "node scripts/generate-sounds.ts",
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
+    "test": "node --test test/*.test.ts",
+    "check:bundle": "node scripts/check-consistency.mjs",
+    "check:client": "node scripts/check-client.mjs",
+    "check:settings": "node scripts/check-settings-form.mjs",
+    "check": "npm run typecheck && npm run test && npm run check:bundle && npm run check:client && npm run check:settings",
+    "prepack": "node node_modules/typescript/lib/tsc.js -p tsconfig.build.json && node node_modules/typescript/lib/tsc.js -p tsconfig.client.json && node scripts/build-client.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.18.4"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-job-controller",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

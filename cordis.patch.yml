@@ -1,0 +1,5 @@
+# One settings row: the plugin card on 插件 → 会话铃声. The row's browser half
+# registers the `plugins.row.config` form and owns every option below.
+- insert:
+    - id: session-chime
+      name: dsh-session-chime

@@ -1,0 +1,7 @@
+Interface Sounds (1.0)
+Created/distributed by Kenney (www.kenney.nl)
+License: Creative Commons Zero, CC0 (http://creativecommons.org/publicdomain/zero/1.0/)
+
+These files are downmixed to mono, resampled to 22050 Hz, trimmed, faded and
+normalized by scripts/generate-sounds.ts. The upstream set is mirrored at
+https://github.com/Calinou/kenney-interface-sounds (commit 4596a49eaf5a533948d49a47467f606bcdea70ff).
