@@ -932,7 +932,7 @@ window.__ModuleLoader__.load({
             continue
           }
           const seeded = field.seed(accepted.value)
-          if (field.kind === 'number') {
+          if (field.kind === 'number' || field.kind === 'range') {
             const parsed = field.parse!(String(staged))
             if (parsed.error !== undefined) return { error: parsed.error }
             if (parsed.value !== Number(seeded)) ops.push({ op: 'set', path: [field.key], value: parsed.value })
