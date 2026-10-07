@@ -23,7 +23,8 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = dirname(dirname(new URL(import.meta.url).pathname))
-const EXPECTED_FIELDS = ['enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs', 'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode', 'minRingMs', 'banner']
+const EXPECTED_FIELDS = ['enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs', 'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode', 'minRingMs', 'banner', 'bannerPlacement']
+const EXPECTED_PLACEMENTS = ['bottom-center', 'bottom-right', 'bottom-left', 'top-right', 'top-left', 'center', 'modal']
 const EXPECTED_SOUNDS = ['chime-soft', 'bell-bright', 'marimba', 'alert-low', 'alert-sharp', 'blip']
 const failures = []
 const check = (ok, message) => {
@@ -130,6 +131,9 @@ if (fiber !== undefined) {
       check(node('restMode').meta?.default === false, 'restMode default is ' + JSON.stringify(node('restMode').meta?.default))
       check(node('minRingMs').meta?.default === 3000, 'minRingMs default is ' + JSON.stringify(node('minRingMs').meta?.default))
       check(node('banner').meta?.default === true, 'banner default is ' + JSON.stringify(node('banner').meta?.default))
+      check(node('bannerPlacement').type === 'union', 'bannerPlacement is not a union but ' + JSON.stringify(node('bannerPlacement').type))
+      check(JSON.stringify((node('bannerPlacement').list ?? []).map(id => json.refs[id]?.value)) === JSON.stringify(EXPECTED_PLACEMENTS), 'bannerPlacement choices are wrong')
+      check(node('bannerPlacement').meta?.default === 'bottom-center', 'bannerPlacement default is ' + JSON.stringify(node('bannerPlacement').meta?.default))
       console.log(JSON.stringify({
         ns: row.ns,
         applies: row.applies,
@@ -137,6 +141,7 @@ if (fiber !== undefined) {
         describedFields: fields,
         soundChoices: (node('soundDone').list ?? []).map(id => json.refs[id]?.value),
         quietChoices: (node('quietStyle').list ?? []).map(id => json.refs[id]?.value),
+        placements: (node('bannerPlacement').list ?? []).map(id => json.refs[id]?.value),
         defaults: Object.fromEntries(EXPECTED_FIELDS.map(field => [field, node(field).meta?.default])),
       }, null, 2))
     }

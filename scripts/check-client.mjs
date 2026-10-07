@@ -52,8 +52,9 @@ check(api.inject?.optional?.includes('jobs'), 'the job roster service is not opt
 check(api.SOUND_IDS.length === 6, 'expected 6 shipped chimes, found ' + api.SOUND_IDS.length);
 check(typeof api.isSettled === 'function' && typeof api.createWatcher === 'function' && typeof api.createEditor === 'function', 'the bundle stops exporting its testable helpers');
 check(typeof api.inQuietHours === 'function' && typeof api.effectiveWindowMs === 'function', 'the bundle stops exporting its quiet-period helpers');
-check(api.FIELDS.length === 13, 'expected 13 editable fields, found ' + api.FIELDS.length);
-check(typeof api.shouldStopOnGesture === 'function', 'the bundle stops exporting the shortest-ring guard');
+check(api.FIELDS.length === 14, 'expected 14 editable fields, found ' + api.FIELDS.length);
+check(typeof api.shouldStopOnGesture === 'function' && typeof api.gestureStopsRing === 'function', 'the bundle stops exporting its stop guards');
+check(api.PLACEMENTS?.length === 7, 'expected 7 banner placements, found ' + api.PLACEMENTS?.length);
 check(typeof api.apply === 'function', 'the bundle exports no apply()');
 check(/\(function \(\) \{/.test(source), 'the IIFE form changed');
 try {

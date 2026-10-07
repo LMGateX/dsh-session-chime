@@ -22,6 +22,7 @@ test('defaults match the shipped chime set', () => {
     restMode: false,
     minRingMs: 3000,
     banner: true,
+    bannerPlacement: 'bottom-center',
   });
 });
 
@@ -60,6 +61,13 @@ test('bad values name the offending field', () => {
   assert.throws(() => resolveRowConfig({ restMode: 'yes' } as never), /restMode must be a boolean/);
   assert.throws(() => resolveRowConfig({ banner: 'yes' } as never), /banner must be a boolean/);
   assert.throws(() => resolveRowConfig({ minRingMs: -1 } as never), /minRingMs must be a whole number/);
+  assert.throws(() => resolveRowConfig({ bannerPlacement: 'middle' } as never), /bannerPlacement must be one of bottom-center/);
+});
+
+test('every banner placement is accepted', () => {
+  for (const placement of ['bottom-center', 'bottom-right', 'bottom-left', 'top-right', 'top-left', 'center', 'modal'] as const) {
+    assert.equal(resolveRowConfig({ bannerPlacement: placement }).bannerPlacement, placement);
+  }
 });
 
 test('duration fields accept hours but refuse a typo-driven week', () => {
@@ -71,13 +79,14 @@ test('duration fields accept hours but refuse a typo-driven week', () => {
 });
 
 test('quiet-period style and clock values pass through', () => {
-  const resolved = resolveRowConfig({ quietStyle: 'silent', dndStart: '22:00', dndEnd: '08:00', restMode: true, minRingMs: 5000, banner: false });
+  const resolved = resolveRowConfig({ quietStyle: 'silent', dndStart: '22:00', dndEnd: '08:00', restMode: true, minRingMs: 5000, banner: false, bannerPlacement: 'modal' });
   assert.equal(resolved.quietStyle, 'silent');
   assert.equal(resolved.dndStart, '22:00');
   assert.equal(resolved.dndEnd, '08:00');
   assert.equal(resolved.restMode, true);
   assert.equal(resolved.minRingMs, 5000);
   assert.equal(resolved.banner, false);
+  assert.equal(resolved.bannerPlacement, 'modal');
 });
 
 test('the schema is a Schemastery node and knows every chime', () => {

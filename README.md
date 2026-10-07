@@ -50,6 +50,7 @@ dsh profile install https://github.com/LMGateX/dsh-session-chime/releases/downlo
 | `restMode` | `false` | 休息模式：一直按上面的安静规则处理 |
 | `minRingMs` | `3000` | 最短响铃：在这之前鼠标/键盘活动不会打断；卡片按钮不受限制 |
 | `banner` | `true` | 响铃时弹出停止卡片（写清哪个会话、带"停止铃声"按钮） |
+| `bannerPlacement` | `bottom-center` | 卡片位置：4 个角落 / 居中 / 居中+遮罩（`modal`） |
 
 六个铃声（全部 CC0，来自 Kenney "Interface Sounds"）：`chime-soft` 柔和双音、`bell-bright` 清脆铃、`marimba` 木琴上行、`alert-low` 低沉警示、`alert-sharp` 短促警示、`blip` 轻点。设置页里点击 **试听完成音** 可以直接听。
 
@@ -76,7 +77,11 @@ dsh profile install https://github.com/LMGateX/dsh-session-chime/releases/downlo
    ```
 
    它注册在公开 slot `shell.overlay`（list 型、叠加式、不替换自带项）；这一层本身点击穿透，只有卡片自己接管指针事件，所以不会挡住底下的操作。可以用 `banner` 关掉整张卡片。
-2. **隐式的鼠标/键盘活动**：点一下页面或按任意键就停——但要先响够 `minRingMs`（默认 3000ms，即"最短响铃"），避免刚响就被你自己无意识的动作掐掉。这一下同时解锁浏览器音频（同一个手势监听）。
+
+   **位置可选**（`bannerPlacement`）：`bottom-center`（默认）、`bottom-right`、`bottom-left`、`top-right`、`top-left`、`center`、`modal`。默认给底部居中的理由很实际——**角落经常已经被别的 UI 插件占了**，强制角落迟早撞车，所以这里是一组可选值而不是写死一个位置。
+
+   **`modal` 是"必须确认"模式**：居中弹窗 + 半透明遮罩，遮罩吞掉整个界面的指针事件，**只有"停止铃声"按钮能让它消失**（鼠标/键盘活动在这个模式下也不会停铃声，只能点按钮或等时长用完）。
+2. **隐式的鼠标/键盘活动**：点一下页面或按任意键就停——但要先响够 `minRingMs`（默认 3000ms，即"最短响铃"），避免刚响就被你自己无意识的动作掐掉。这一下同时解锁浏览器音频（同一个手势监听）。**这条规则在 `bannerPlacement: modal` 下不生效**，那种模式只认按钮。
 3. **自然结束**：`durationMs` 用完。
 
 新铃声会顶掉正在响的那一声（同一时刻只有一声）；设置页的"试听完成音"走同一条路径，因此也能预览这张卡片。
@@ -103,12 +108,12 @@ npm run build        # lib/ + client/client.js
 
 仓库结构：
 
-- `src/config.ts` — 设置页渲染的 Schemastery schema（十三个字段全部 volatile）。
+- `src/config.ts` — 设置页渲染的 Schemastery schema（十四个字段全部 volatile）。
 - `src/index.ts` — host 半边：只发布 schema，不挂任何监听、不起定时器。
 - `client/main.ts` — 浏览器半边：会话监听、判定、播放、设置表单。
 - `client/sounds.generated.js` — 由 `scripts/generate-sounds.ts` 生成的声音表（base64 WAV）。
 - `scripts/build-client.mjs` — 把声音表与编译后的 `client/main.js` 拼成一个 classic script `client/client.js`。
-- `scripts/check-settings-form.mjs` — 用**真实安装的** `@deepseek-ai/dsh-settings` 跑 `describe()`，证明插件页会渲染出这十三个控件。
+- `scripts/check-settings-form.mjs` — 用**真实安装的** `@deepseek-ai/dsh-settings` 跑 `describe()`，证明插件页会渲染出这十四个控件。
 
 ## English
 

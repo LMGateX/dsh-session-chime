@@ -136,7 +136,24 @@ export interface ChimeSettings {
   readonly minRingMs: number
   /** Whether a ring shows the stop banner. */
   readonly banner: boolean
+  /** Where the stop banner sits; `modal` adds a mask only the button clears. */
+  readonly bannerPlacement: BannerPlacement
 }
+
+/** Every banner placement the settings page offers, in display order. */
+export type BannerPlacement =
+  | 'bottom-center'
+  | 'bottom-right'
+  | 'bottom-left'
+  | 'top-right'
+  | 'top-left'
+  | 'center'
+  | 'modal'
+
+/** Every banner placement, mirroring src/config.ts. */
+export const BANNER_PLACEMENTS: readonly BannerPlacement[] = [
+  'bottom-center', 'bottom-right', 'bottom-left', 'top-right', 'top-left', 'center', 'modal',
+]
 
 /** What the banner shows about the ring it belongs to. */
 export interface RingInfo {
@@ -177,4 +194,5 @@ export const DEFAULT_SETTINGS: ChimeSettings = {
   restMode: false,
   minRingMs: 3000,
   banner: true,
+  bannerPlacement: 'bottom-center',
 }

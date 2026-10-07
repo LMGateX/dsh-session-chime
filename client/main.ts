@@ -339,6 +339,31 @@ window.__ModuleLoader__.load({
       return startedAt !== undefined && now - startedAt >= minRingMs
     }
 
+    /**
+     * Whether a gesture may stop the current ring, banner placement included.
+     *
+     * The masked modal is the one placement that ignores activity by design: its
+     * whole point is "acknowledge this", so only the button (or the window
+     * running out) ends the ring there.
+     *
+     * @param placement - configured banner placement.
+     * @param bannerShown - whether the banner is on at all; without it, no placement applies.
+     * @param startedAt - page wall-clock ms of the ring, or undefined when silent.
+     * @param now - current page wall-clock ms.
+     * @param minRingMs - configured shortest ring.
+     * @returns true when a gesture may stop the ring.
+     */
+    function gestureStopsRing(
+      placement: string,
+      bannerShown: boolean,
+      startedAt: number | undefined,
+      now: number,
+      minRingMs: number,
+    ): boolean {
+      if (bannerShown && placement === 'modal') return false
+      return shouldStopOnGesture(startedAt, now, minRingMs)
+    }
+
     /** Decode one embedded data URL into raw bytes. */
     function decodeBase64(data: string): ArrayBuffer {
       const comma = data.indexOf(',')
@@ -647,8 +672,22 @@ window.__ModuleLoader__.load({
       },
       {
         key: 'banner', kind: 'boolean', label: '响铃时显示停止卡片',
-        hint: '在界面下方弹出卡片，写明是哪个会话完成/受阻，并带一个“停止铃声”按钮。',
+        hint: '弹出卡片写明是哪个会话完成/受阻，并带一个“停止铃声”按钮（按钮点下去立即停，不受最短响铃限制）。',
         seed: value => booleanOf(value, 'banner', true),
+      },
+      {
+        key: 'bannerPlacement', kind: 'enum', label: '卡片位置',
+        hint: '默认底部居中，最不容易和其它 UI 插件的角落控件打架；四个角落都可能撞位置，所以这里给了一组可选值。选“modal”是带半透明遮罩的居中弹窗：必须点按钮才消失，鼠标/键盘活动也不会停铃声。',
+        choices: [
+          { value: 'bottom-center', label: '底部居中（默认）' },
+          { value: 'bottom-right', label: '右下角' },
+          { value: 'bottom-left', label: '左下角' },
+          { value: 'top-right', label: '右上角' },
+          { value: 'top-left', label: '左上角' },
+          { value: 'center', label: '居中（无遮罩）' },
+          { value: 'modal', label: '居中 + 半透明遮罩（必须点按钮）' },
+        ],
+        seed: value => placementOf(value),
       },
     ]
 
@@ -678,6 +717,17 @@ window.__ModuleLoader__.load({
     function quietStyleOf(value: unknown): string {
       const raw = section(value).quietStyle
       return raw === 'silent' ? 'silent' : 'short'
+    }
+
+    /** Every banner placement, in display order. */
+    const PLACEMENTS: readonly string[] = [
+      'bottom-center', 'bottom-right', 'bottom-left', 'top-right', 'top-left', 'center', 'modal',
+    ]
+
+    /** Read a banner placement, defaulting the way the host does. */
+    function placementOf(value: unknown): string {
+      const raw = section(value).bannerPlacement
+      return typeof raw === 'string' && PLACEMENTS.includes(raw) ? raw : 'bottom-center'
     }
 
     /** Read a local clock field, defaulting to "always" (empty). */
@@ -710,6 +760,7 @@ window.__ModuleLoader__.load({
         restMode: booleanOf(value, 'restMode', false),
         minRingMs: minRing,
         banner: booleanOf(value, 'banner', true),
+        bannerPlacement: placementOf(value) as ChimeSettings['bannerPlacement'],
       }
     }
 
@@ -916,15 +967,19 @@ window.__ModuleLoader__.load({
         borderRadius: 'var(--dsw-radius-md)', font: 'inherit',
         color: 'var(--dsw-alias-label-secondary)', background: 'var(--dsw-alias-bg-layer-2)',
       },
-      banner: {
-        position: 'fixed', left: '50%', bottom: 28, transform: 'translateX(-50%)',
-        zIndex: 40, display: 'flex', gap: 18, alignItems: 'center',
+      bannerCard: {
+        position: 'fixed', zIndex: 60, display: 'flex', gap: 18, alignItems: 'center',
         maxWidth: 'min(560px, calc(100vw - 48px))', padding: '16px 20px',
         border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-lg)',
         background: 'var(--dsw-alias-bg-layer-1)', boxShadow: '0 12px 32px rgba(0, 0, 0, 0.28)',
         color: 'var(--dsw-alias-label-primary)',
         // The overlay layer is click-through; the card opts back in.
         pointerEvents: 'auto',
+      },
+      bannerMask: {
+        position: 'fixed', inset: 0, zIndex: 60,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'rgba(0, 0, 0, 0.45)', pointerEvents: 'auto',
       },
       bannerText: { display: 'grid', gap: 4, fontSize: 13, lineHeight: 1.5 },
       bannerTitle: { fontWeight: 600, fontSize: 15, wordBreak: 'break-word' },
@@ -1056,7 +1111,7 @@ window.__ModuleLoader__.load({
       // setting, but a click or key press means the human is back and has heard it.
       const onGesture = (): void => {
         audio.unlock()
-        if (shouldStopOnGesture(activeRing?.startedAt, Date.now(), latest.minRingMs)) stopRing()
+        if (gestureStopsRing(latest.bannerPlacement, latest.banner, activeRing?.startedAt, Date.now(), latest.minRingMs)) stopRing()
       }
       window.addEventListener('pointerdown', onGesture, { capture: true, passive: true })
       window.addEventListener('keydown', onGesture, { capture: true, passive: true })
@@ -1193,6 +1248,30 @@ window.__ModuleLoader__.load({
         label: () => '休息模式',
       }, RestModeSwitch)), 'dsh-session-chime: rest-mode switch')
 
+      /**
+       * Position one banner card inside the frame-wide overlay layer.
+       *
+       * Corners are offered because no single spot suits every setup: another UI
+       * plugin's widget usually owns one of them, so which corner is free is a
+       * deployment question, not a design one. `bottom-center` stays the default
+       * for exactly that reason.
+       *
+       * @param placement - configured placement.
+       * @returns the card's style object.
+       */
+      function bannerFrame(placement: string): Record<string, unknown> {
+        const inset = 28
+        switch (placement) {
+          case 'bottom-right': return { ...styles.bannerCard, right: inset, bottom: inset }
+          case 'bottom-left': return { ...styles.bannerCard, left: inset, bottom: inset }
+          case 'top-right': return { ...styles.bannerCard, right: inset, top: inset }
+          case 'top-left': return { ...styles.bannerCard, left: inset, top: inset }
+          case 'center':
+          case 'modal': return { ...styles.bannerCard, left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
+          default: return { ...styles.bannerCard, left: '50%', bottom: inset, transform: 'translateX(-50%)' }
+        }
+      }
+
       /** The frame-wide card that names the finished session and offers the stop button. */
       function ChimeBanner(): unknown {
         const entry = React.useSyncExternalStore(banner.subscribe, banner.getSnapshot, banner.getSnapshot)
@@ -1200,14 +1279,26 @@ window.__ModuleLoader__.load({
         const done = entry.reason === 'done'
         const seconds = Math.max(1, Math.round(entry.windowMs / 1000))
         const minSeconds = Math.max(0, Math.round(latest.minRingMs / 1000))
-        return h('div', { style: styles.banner, role: 'status', 'aria-live': 'polite' },
-          h('div', { style: styles.bannerText },
-            h('strong', null, done ? '🔔 会话已完成' : '⚠️ 目标受阻'),
-            h('span', { style: styles.bannerTitle }, entry.title === '' ? entry.sessionId : entry.title),
-            h('span', { style: styles.hint }, minSeconds > 0
-              ? `铃声会响到 ${seconds} 秒用完；响够 ${minSeconds} 秒后，点一下页面或按任意键也会停。`
-              : `铃声会响到 ${seconds} 秒用完；点一下页面或按任意键也会停。`)),
-          h('button', { type: 'button', style: styles.bannerButton, onClick: () => stopRing() }, '停止铃声'))
+        const masked = latest.bannerPlacement === 'modal'
+        const hint = masked
+          ? `铃声会响到 ${seconds} 秒用完。这个位置带遮罩：只能点下面的按钮结束铃声并关闭它。`
+          : minSeconds > 0
+            ? `铃声会响到 ${seconds} 秒用完；响够 ${minSeconds} 秒后，点一下页面或按任意键也会停。`
+            : `铃声会响到 ${seconds} 秒用完；点一下页面或按任意键也会停。`
+        const card = h('div', {
+          style: masked ? styles.bannerCard : bannerFrame(latest.bannerPlacement),
+          role: 'status',
+          'aria-live': 'polite',
+        },
+        h('div', { style: styles.bannerText },
+          h('strong', null, done ? '🔔 会话已完成' : '⚠️ 目标受阻'),
+          h('span', { style: styles.bannerTitle }, entry.title === '' ? entry.sessionId : entry.title),
+          h('span', { style: styles.hint }, hint)),
+        h('button', { type: 'button', style: styles.bannerButton, onClick: () => stopRing() }, '停止铃声'))
+        if (!masked) return card
+        // The mask swallows every pointer event on purpose; the layer is still
+        // click-through for the rest of the shell because only the mask opts in.
+        return h('div', { style: styles.bannerMask }, card)
       }
 
       ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
@@ -1234,6 +1325,8 @@ window.__ModuleLoader__.load({
     exported.effectiveWindowMs = effectiveWindowMs
     exported.checkTime = checkTime
     exported.shouldStopOnGesture = shouldStopOnGesture
+    exported.gestureStopsRing = gestureStopsRing
+    exported.PLACEMENTS = PLACEMENTS
     exported.summary = summary
     exported.ROW_ID = ROW_ID
     exported.FIELDS = FIELDS.map(field => field.key)

@@ -41,6 +41,14 @@ export type QuietStyle = (typeof quietStyles)[number]
  */
 export const MAX_DURATION_MS = 6 * 60 * 60 * 1000
 
+/** Where the ringing banner sits, and whether it takes a mask. */
+export const bannerPlacements = [
+  'bottom-center', 'bottom-right', 'bottom-left', 'top-right', 'top-left', 'center', 'modal',
+] as const
+
+/** One banner placement. */
+export type BannerPlacement = (typeof bannerPlacements)[number]
+
 /** `HH:mm` in 24-hour local time, or the empty string for "always". */
 const CLOCK = /^(?:[01]\d|2[0-3]):[0-5]\d$/
 
@@ -75,6 +83,8 @@ export interface RowConfig {
   readonly minRingMs?: Live<number>
   /** Whether a ring shows the stop banner. */
   readonly banner?: Live<boolean>
+  /** Where the stop banner sits; `modal` adds a translucent mask that only the button clears. */
+  readonly bannerPlacement?: Live<BannerPlacement>
 }
 
 /** Plain row configuration, as tests and hand-written compositions pass it. */
@@ -105,6 +115,8 @@ export interface RowConfigInput {
   readonly minRingMs?: number
   /** Whether a ring shows the stop banner. */
   readonly banner?: boolean
+  /** Where the stop banner sits; `modal` adds a translucent mask that only the button clears. */
+  readonly bannerPlacement?: BannerPlacement
 }
 
 /** Validated row configuration with every default applied. */
@@ -122,12 +134,13 @@ export interface ResolvedRowConfig {
   readonly restMode: boolean
   readonly minRingMs: number
   readonly banner: boolean
+  readonly bannerPlacement: BannerPlacement
 }
 
 /** Configuration keys this row accepts; anything else is a composition error. */
 export const knownRowKeys: readonly string[] = [
   'enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs',
-  'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode', 'minRingMs', 'banner',
+  'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode', 'minRingMs', 'banner', 'bannerPlacement',
 ]
 
 /**
@@ -212,6 +225,15 @@ export const Config = Schema.object({
     '响铃时在界面上弹出提示卡，写明是哪个会话完成/受阻，并带一个“停止铃声”按钮。' +
     ' Show a stop banner while ringing: it names the session and offers one big stop button.',
   )),
+  bannerPlacement: live(Schema.union(bannerPlacements.map(placement => Schema.const(placement).description(
+    placement === 'modal'
+      ? '居中 + 半透明遮罩：遮罩挡住整个界面，只有“停止铃声”按钮能让它消失（鼠标/键盘活动也不会停铃声，只能等时长用完或点按钮）。' +
+        ' Centred with a translucent mask: it covers the frame and only the stop button clears it — pointer and key activity no longer stop the ring either.'
+      : placement + '；角落位置可能与其它 UI 插件的位置重叠，所以这里给了一组可选值。' + ` Placement "${placement}"; corners can collide with other UI plugins, which is why this is a choice.`,
+  ))).default('bottom-center').description(
+    '提示卡出现在哪里。默认底部居中——最不容易和别的插件抢角落；选 modal 则是带半透明遮罩的居中弹窗，必须点按钮才消失。' +
+    ' Where the card appears. Default bottom-centre, the spot least likely to collide with another plugin’s corner widget; “modal” adds a translucent mask that only the button clears.',
+  )),
 })
 
 /**
@@ -239,6 +261,7 @@ export function resolveRowConfig(config: RowConfig | RowConfigInput = {}): Resol
     restMode: optionalBoolean('restMode', liveValue(config.restMode)) ?? false,
     minRingMs: optionalDuration('minRingMs', liveValue(config.minRingMs)) ?? 3000,
     banner: optionalBoolean('banner', liveValue(config.banner)) ?? true,
+    bannerPlacement: optionalPlacement(liveValue(config.bannerPlacement)) ?? 'bottom-center',
   }
 }
 
@@ -278,6 +301,14 @@ function optionalDuration(field: string, value: unknown): number | undefined {
     throw new Error(`session-chime: ${field} must be a whole number of milliseconds between 0 and ${MAX_DURATION_MS}`)
   }
   return value
+}
+
+function optionalPlacement(value: unknown): BannerPlacement | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !(bannerPlacements as readonly string[]).includes(value)) {
+    throw new Error(`session-chime: bannerPlacement must be one of ${bannerPlacements.join(', ')}`)
+  }
+  return value as BannerPlacement
 }
 
 function optionalClock(field: string, value: unknown): string | undefined {

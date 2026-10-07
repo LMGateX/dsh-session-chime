@@ -34,6 +34,8 @@ interface ClientApi {
   effectiveWindowMs(settings: Record<string, unknown>, clipMs: number, now: Date): number;
   checkTime(text: string): string | undefined;
   shouldStopOnGesture(startedAt: number | undefined, now: number, minRingMs: number): boolean;
+  gestureStopsRing(placement: string, bannerShown: boolean, startedAt: number | undefined, now: number, minRingMs: number): boolean;
+  PLACEMENTS: string[];
   ROW_ID: string;
   FIELDS: string[];
   SOUND_IDS: string[];
@@ -311,6 +313,8 @@ test('settingsOf falls back to the shipped defaults on junk', () => {
   assert.equal(client.settingsOf({ restMode: 'yes' }).restMode, false);
   assert.equal(client.settingsOf({ minRingMs: -1 }).minRingMs, 3000);
   assert.equal(client.settingsOf({ banner: 'yes' }).banner, true);
+  assert.equal(client.settingsOf({ bannerPlacement: 'middle' }).bannerPlacement, 'bottom-center');
+  assert.equal(client.settingsOf({ bannerPlacement: 'modal' }).bannerPlacement, 'modal');
 });
 
 test('parseClock reads a 24-hour local time', () => {
@@ -372,6 +376,19 @@ test('shortest-ring guard: activity cannot cut a ring too early', () => {
   assert.equal(client.shouldStopOnGesture(1000, 1000, 0), true);
 });
 
+test('the masked modal ignores activity; every other placement honours the guard', () => {
+  // Modal: never stopped by a gesture, however long the ring has been going.
+  assert.equal(client.gestureStopsRing('modal', true, 1000, 99_999, 3000), false);
+  // Without the banner there is no modal to acknowledge, so the guard decides.
+  assert.equal(client.gestureStopsRing('modal', false, 1000, 5000, 3000), true);
+  // Corner and centre placements behave like the plain guard.
+  for (const placement of ['bottom-center', 'bottom-right', 'bottom-left', 'top-right', 'top-left', 'center']) {
+    assert.equal(client.gestureStopsRing(placement, true, 1000, 2000, 3000), false, placement);
+    assert.equal(client.gestureStopsRing(placement, true, 1000, 5000, 3000), true, placement);
+  }
+  assert.deepEqual(client.PLACEMENTS, ['bottom-center', 'bottom-right', 'bottom-left', 'top-right', 'top-left', 'center', 'modal']);
+});
+
 test('the time field accepts an empty string or HH:mm only', () => {
   assert.equal(client.checkTime(''), undefined);
   assert.equal(client.checkTime('07:05'), undefined);
@@ -391,6 +408,6 @@ test('the bundle declares its row and the shipped chime set', () => {
   assert.deepEqual(client.SOUND_IDS, ['chime-soft', 'bell-bright', 'marimba', 'alert-low', 'alert-sharp', 'blip']);
   assert.deepEqual(client.FIELDS, [
     'enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs',
-    'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode', 'minRingMs', 'banner',
+    'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode', 'minRingMs', 'banner', 'bannerPlacement',
   ]);
 });
