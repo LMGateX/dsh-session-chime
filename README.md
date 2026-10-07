@@ -33,6 +33,20 @@ dsh profile install https://github.com/LMGateX/dsh-session-chime/releases/downlo
 
 装好后在 **插件 → 会话铃声 → 点组件行 `session-chime`** 打开设置表单。
 
+## 设置页
+
+插件页里的表单分成三组，各用一条品牌色竖线标出组名，控件用主题色（主按钮是实心品牌色、试听按钮是描边品牌色、滑块与开关用 accent 色），卡片背景走 `--dsw-alias-bg-layer-2`，深浅色主题都跟着 DSH 自己的 token：
+
+| 分组 | 字段 |
+|---|---|
+| 提示音 | 启用铃声、完成提示音、受阻提示音、音量（滑块）、播放时长、安静判定 |
+| 安静规则 | 勿扰/休息时怎么响、短响时长、勿扰时段开始/结束（时间选择器）、休息模式 |
+| 停止与提示卡 | 最短响铃、显示停止卡片、卡片位置 |
+
+文案**跟随界面语言**：通过公开的 `ctx.locale` 服务把每条标签/说明解析成当前语言（内置中文与英文），locale 切换会即时重绘；面板标题与描述来自 `locale/zh.json` / `locale/en.json`。宿主 schema 里的描述同样中英双语（生成表单会原样打印）。
+
+响铃卡片也会按原因着色：完成是绿色（`--dsw-alias-state-success-primary`）、受阻是琥珀色（`--dsw-alias-state-warn-primary`），停止按钮用实心品牌色。
+
 ## 设置项
 
 | 字段 | 默认 | 说明 |

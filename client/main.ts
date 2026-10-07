@@ -500,15 +500,30 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** One bilingual string; the platform locale service picks the active language. */
+    interface Text {
+      readonly en: string
+      readonly zh: string
+    }
+
+    /** The slice of the client locale service this bundle uses, resolved optionally. */
+    interface LocaleLike {
+      getLocale(): { readonly active: string }
+      subscribe(listener: () => void): () => void
+      resolveText(text: unknown): string
+    }
+
     /** One editable field on the settings page. */
     interface FieldSpec {
       /** Configuration path, also the editor state key. */
       readonly key: string
-      readonly kind: 'boolean' | 'enum' | 'number' | 'time'
-      readonly label: string
-      readonly hint: string
+      readonly kind: 'boolean' | 'enum' | 'number' | 'time' | 'range'
+      /** Section this field is grouped under, in first-appearance order. */
+      readonly section: Text
+      readonly label: Text
+      readonly hint: Text
       /** Choice list for `enum` fields. */
-      readonly choices?: readonly { readonly value: string; readonly label: string }[]
+      readonly choices?: readonly { readonly value: string; readonly label: string | Text }[]
       readonly min?: number
       readonly max?: number
       readonly step?: number
@@ -599,93 +614,166 @@ window.__ModuleLoader__.load({
     }
 
     /** Read the chime choice list out of the generated sound table, in shipped order. */
-    const SOUND_CHOICES: readonly { value: string; label: string }[] = Object.keys(__CHIME_SOUNDS)
-      .map(id => ({ value: id, label: __CHIME_SOUNDS[id]!.label + '（' + id + '）' }))
+    const SOUND_CHOICES: readonly { value: string; label: Text }[] = Object.keys(__CHIME_SOUNDS)
+      .map(id => ({ value: id, label: { zh: __CHIME_SOUNDS[id]!.label + '（' + id + '）', en: id } }))
+
+    /** Section labels, in display order. */
+    const SECTIONS: readonly Text[] = [
+      { zh: '提示音', en: 'Chimes' },
+      { zh: '安静规则', en: 'Quiet hours' },
+      { zh: '停止与提示卡', en: 'Stopping and the card' },
+    ]
+    const SOUNDS_SECTION = SECTIONS[0]!
+    const QUIET_SECTION = SECTIONS[1]!
+    const STOP_SECTION = SECTIONS[2]!
 
     /** Every editable field, in display order. */
     const FIELDS: readonly FieldSpec[] = [
       {
-        key: 'enabled', kind: 'boolean', label: '启用铃声',
-        hint: '关闭后不再播放任何提示音；插件行与本页设置都保留，随时可以打开。',
+        key: 'enabled', kind: 'boolean', section: SOUNDS_SECTION,
+        label: { zh: '启用铃声', en: 'Enable chimes' },
+        hint: {
+          zh: '关闭后不再播放任何提示音；插件行与本页设置都保留，随时可以打开。',
+          en: 'No chime plays while this is off; the row and these settings stay, ready to switch back on.',
+        },
         seed: value => booleanOf(value, 'enabled', true),
       },
       {
-        key: 'soundDone', kind: 'enum', label: '完成提示音',
-        hint: '主 agent 完全停下时播放：没有运行中的回合、没有它自己的后台作业、没有在工作的子代理。',
+        key: 'soundDone', kind: 'enum', section: SOUNDS_SECTION,
+        label: { zh: '完成提示音', en: 'Finished chime' },
+        hint: {
+          zh: '主 agent 完全停下时播放：没有运行中的回合、没有它自己的后台作业、没有在工作的子代理。',
+          en: 'Plays when the agent truly stops: no running turn, no live job of its own, no working subagent.',
+        },
         choices: SOUND_CHOICES,
         seed: value => soundOf(value, 'soundDone', 'chime-soft'),
       },
       {
-        key: 'soundBlocked', kind: 'enum', label: '受阻提示音',
-        hint: '会话的目标进入 blocked（受阻）状态时播放，与“完成”区分开。',
+        key: 'soundBlocked', kind: 'enum', section: SOUNDS_SECTION,
+        label: { zh: '受阻提示音', en: 'Blocked chime' },
+        hint: {
+          zh: '会话的目标进入 blocked（受阻）状态时播放，与“完成”区分开。',
+          en: 'Plays when the session’s goal becomes blocked, so it is audibly different from “finished”.',
+        },
         choices: SOUND_CHOICES,
         seed: value => soundOf(value, 'soundBlocked', 'alert-low'),
       },
       {
-        key: 'volume', kind: 'number', label: '音量（0–1）', hint: '0＝静音，1＝原始音量。保存后在下一声生效。',
+        key: 'volume', kind: 'range', section: SOUNDS_SECTION,
+        label: { zh: '音量', en: 'Volume' },
+        hint: {
+          zh: '0＝静音，1＝原始音量。保存后在下一声生效。',
+          en: '0 is silent, 1 is the clip’s own level; applies from the next chime.',
+        },
         min: 0, max: 1, step: 0.05, parse: parseVolume,
         seed: value => numberOf(value, 'volume', 0.8),
       },
       {
-        key: 'durationMs', kind: 'number', label: '播放时长（毫秒）', hint: '0＝每声完整播放一次；正数＝最多响这么久，铃声较短时自动重复（上限 8 秒）。',
-        min: 0, step: 100, parse: parseDuration,
+        key: 'durationMs', kind: 'number', section: SOUNDS_SECTION,
+        label: { zh: '播放时长（毫秒）', en: 'Playback window (ms)' },
+        hint: {
+          zh: '0＝每声完整播放一次；正数＝最多响这么久，铃声较短时按间隔重复（上限 6 小时）。',
+          en: '0 plays each chime once; a positive value repeats a short chime until the window runs out (max 6 hours).',
+        },
+        min: 0, step: 1000, parse: parseDuration,
         seed: value => numberOf(value, 'durationMs', 0),
       },
       {
-        key: 'debounceMs', kind: 'number', label: '安静判定（毫秒）', hint: '会话停下后需要安静这么久才判定为“结束”，用来躲开自动续行等回合间隙。默认 1500。',
+        key: 'debounceMs', kind: 'number', section: SOUNDS_SECTION,
+        label: { zh: '安静判定（毫秒）', en: 'Settle delay (ms)' },
+        hint: {
+          zh: '会话停下后需要安静这么久才判定为“结束”，用来躲开自动续行等回合间隙。',
+          en: 'How long a session must stay quiet before it counts as finished; keeps inter-round gaps silent.',
+        },
         min: 0, step: 100, parse: parseDuration,
         seed: value => numberOf(value, 'debounceMs', 1500),
       },
       {
-        key: 'quietStyle', kind: 'enum', label: '勿扰 / 休息时怎么响',
-        hint: '安静期间（勿扰时段或休息模式）把铃声缩短，还是完全静默。',
+        key: 'quietStyle', kind: 'enum', section: QUIET_SECTION,
+        label: { zh: '勿扰 / 休息时怎么响', en: 'Inside a quiet period' },
+        hint: {
+          zh: '安静期间（勿扰时段或休息模式）把铃声缩短，还是完全静默。',
+          en: 'Shorten the chime, or stay completely silent, during a do-not-disturb window or rest mode.',
+        },
         choices: [
-          { value: 'short', label: '短响（用下面的短响时长）' },
-          { value: 'silent', label: '不响（静默）' },
+          { value: 'short', label: { zh: '短响（用下面的短响时长）', en: 'Shorten it (using the window below)' } },
+          { value: 'silent', label: { zh: '不响（静默）', en: 'Stay silent' } },
         ],
         seed: value => quietStyleOf(value),
       },
       {
-        key: 'quietShortMs', kind: 'number', label: '短响时长（毫秒）', hint: '安静期间“短响”用多长。默认 600。',
+        key: 'quietShortMs', kind: 'number', section: QUIET_SECTION,
+        label: { zh: '短响时长（毫秒）', en: 'Short chime window (ms)' },
+        hint: {
+          zh: '安静期间“短响”用多长。',
+          en: 'How long the shortened chime plays inside a quiet period.',
+        },
         min: 0, step: 100, parse: parseDuration,
         seed: value => numberOf(value, 'quietShortMs', 600),
       },
       {
-        key: 'dndStart', kind: 'time', label: '勿扰时段开始', hint: '本地时间 HH:mm，例如 22:00。留空、或与结束相同＝不启用勿扰时段。',
+        key: 'dndStart', kind: 'time', section: QUIET_SECTION,
+        label: { zh: '勿扰时段开始', en: 'Do-not-disturb from' },
+        hint: {
+          zh: '本地时间 HH:mm，例如 22:00。留空、或与结束相同＝不启用勿扰时段。',
+          en: 'Local HH:mm, e.g. 22:00. Empty, or equal to the end, disables the window.',
+        },
         check: checkTime,
         seed: value => clockOf(value, 'dndStart'),
       },
       {
-        key: 'dndEnd', kind: 'time', label: '勿扰时段结束', hint: '结束早于开始表示跨午夜（22:00 → 08:00）。',
+        key: 'dndEnd', kind: 'time', section: QUIET_SECTION,
+        label: { zh: '勿扰时段结束', en: 'Do-not-disturb until' },
+        hint: {
+          zh: '结束早于开始表示跨午夜（22:00 → 08:00）。',
+          en: 'An end earlier than the start crosses midnight (22:00 → 08:00).',
+        },
         check: checkTime,
         seed: value => clockOf(value, 'dndEnd'),
       },
       {
-        key: 'restMode', kind: 'boolean', label: '休息模式',
-        hint: '打开后一直按上面的安静规则处理；也可以点侧边栏底部的按钮直接切换。',
+        key: 'restMode', kind: 'boolean', section: QUIET_SECTION,
+        label: { zh: '休息模式', en: 'Rest mode' },
+        hint: {
+          zh: '打开后一直按上面的安静规则处理；也可以点侧边栏底部的 🌙 按钮直接切换。',
+          en: 'Treats every chime as inside a quiet period; the 🌙 switch at the sidebar foot toggles it too.',
+        },
         seed: value => booleanOf(value, 'restMode', false),
       },
       {
-        key: 'minRingMs', kind: 'number', label: '最短响铃（毫秒）', hint: '在这之前鼠标/键盘活动不会打断铃声，保证长响铃至少被听到这么久；卡片上的“停止铃声”按钮不受限制。默认 3000。',
+        key: 'minRingMs', kind: 'number', section: STOP_SECTION,
+        label: { zh: '最短响铃（毫秒）', en: 'Shortest ring (ms)' },
+        hint: {
+          zh: '在这之前鼠标/键盘活动不会打断铃声，保证长响铃至少被听到这么久；卡片上的“停止铃声”按钮不受限制。',
+          en: 'Pointer or key activity cannot stop a ring before this, so a long ring is always heard; the card’s stop button ignores it.',
+        },
         min: 0, step: 500, parse: parseDuration,
         seed: value => numberOf(value, 'minRingMs', 3000),
       },
       {
-        key: 'banner', kind: 'boolean', label: '响铃时显示停止卡片',
-        hint: '弹出卡片写明是哪个会话完成/受阻，并带一个“停止铃声”按钮（按钮点下去立即停，不受最短响铃限制）。',
+        key: 'banner', kind: 'boolean', section: STOP_SECTION,
+        label: { zh: '响铃时显示停止卡片', en: 'Show the stop card' },
+        hint: {
+          zh: '弹出卡片写明是哪个会话完成/受阻，并带一个“停止铃声”按钮（按钮点下去立即停）。',
+          en: 'A card names the finished session and offers one stop button that ends the ring immediately.',
+        },
         seed: value => booleanOf(value, 'banner', true),
       },
       {
-        key: 'bannerPlacement', kind: 'enum', label: '卡片位置',
-        hint: '默认底部居中，最不容易和其它 UI 插件的角落控件打架；四个角落都可能撞位置，所以这里给了一组可选值。选“modal”是带半透明遮罩的居中弹窗：必须点按钮才消失，鼠标/键盘活动也不会停铃声。',
+        key: 'bannerPlacement', kind: 'enum', section: STOP_SECTION,
+        label: { zh: '卡片位置', en: 'Card position' },
+        hint: {
+          zh: '默认底部居中，最不容易和其它 UI 插件的角落控件打架；选“modal”是带半透明遮罩的居中弹窗，必须点按钮才消失，鼠标/键盘活动也不会停铃声。',
+          en: 'Bottom-centre by default, the spot least likely to collide with another plugin’s corner widget. “modal” adds a translucent mask that only the button clears and ignores pointer and key activity.',
+        },
         choices: [
-          { value: 'bottom-center', label: '底部居中（默认）' },
-          { value: 'bottom-right', label: '右下角' },
-          { value: 'bottom-left', label: '左下角' },
-          { value: 'top-right', label: '右上角' },
-          { value: 'top-left', label: '左上角' },
-          { value: 'center', label: '居中（无遮罩）' },
-          { value: 'modal', label: '居中 + 半透明遮罩（必须点按钮）' },
+          { value: 'bottom-center', label: { zh: '底部居中（默认）', en: 'Bottom centre (default)' } },
+          { value: 'bottom-right', label: { zh: '右下角', en: 'Bottom right' } },
+          { value: 'bottom-left', label: { zh: '左下角', en: 'Bottom left' } },
+          { value: 'top-right', label: { zh: '右上角', en: 'Top right' } },
+          { value: 'top-left', label: { zh: '左上角', en: 'Top left' } },
+          { value: 'center', label: { zh: '居中（无遮罩）', en: 'Centre, no mask' } },
+          { value: 'modal', label: { zh: '居中 + 半透明遮罩（必须点按钮）', en: 'Centre with a mask (button only)' } },
         ],
         seed: value => placementOf(value),
       },
@@ -940,7 +1028,28 @@ window.__ModuleLoader__.load({
     }
 
     const styles: Record<string, Record<string, unknown>> = {
-      root: { display: 'grid', gap: 16, color: 'var(--dsw-alias-label-primary)', fontSize: 13 },
+      root: { display: 'grid', gap: 14, color: 'var(--dsw-alias-label-primary)', fontSize: 13, paddingBottom: 4 },
+      header: { display: 'flex', gap: 12, alignItems: 'center' },
+      headerBadge: {
+        display: 'grid', placeItems: 'center', width: 38, height: 38, flexShrink: 0,
+        borderRadius: 'var(--dsw-radius-lg)', fontSize: 18,
+        background: 'var(--dsw-alias-interactive-bg-hover-accent)',
+        border: '1px solid var(--dsw-alias-border-l1)',
+      },
+      headerCopy: { display: 'grid', gap: 3 },
+      title: { margin: 0, fontSize: 16, fontWeight: 600, lineHeight: 1.3 },
+      subtitle: { margin: 0, color: 'var(--dsw-alias-label-secondary)', fontSize: 12, lineHeight: 1.6 },
+      card: {
+        display: 'grid', gap: 14, padding: '14px 16px',
+        background: 'var(--dsw-alias-bg-layer-2)',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        borderRadius: 'var(--dsw-radius-lg)',
+      },
+      sectionTitle: {
+        margin: 0, paddingLeft: 8, fontSize: 12, fontWeight: 600, letterSpacing: '0.06em',
+        color: 'var(--dsw-alias-label-secondary)',
+        borderLeft: '3px solid var(--dsw-alias-brand-primary)',
+      },
       field: { display: 'grid', gap: 7 },
       label: { fontWeight: 600 },
       hint: { margin: 0, color: 'var(--dsw-alias-label-secondary)', fontSize: 12, lineHeight: 1.6 },
@@ -949,7 +1058,16 @@ window.__ModuleLoader__.load({
         border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-md)',
         color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-3)', font: 'inherit',
       },
+      switchRow: { display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'space-between' },
+      switchText: { color: 'var(--dsw-alias-brand-text)', fontWeight: 600 },
       check: { display: 'flex', gap: 8, alignItems: 'center' },
+      checkbox: { width: 16, height: 16, accentColor: 'var(--dsw-alias-brand-primary)' },
+      rangeRow: { display: 'flex', gap: 10, alignItems: 'center' },
+      range: { flex: 1, accentColor: 'var(--dsw-alias-brand-primary)' },
+      rangeValue: {
+        minWidth: 44, textAlign: 'right', fontWeight: 600,
+        color: 'var(--dsw-alias-brand-text)', fontVariantNumeric: 'tabular-nums',
+      },
       number: {
         boxSizing: 'border-box', width: '100%', padding: '8px 10px',
         border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-md)',
@@ -958,8 +1076,21 @@ window.__ModuleLoader__.load({
       actions: { display: 'flex', gap: 8, flexWrap: 'wrap' },
       button: {
         padding: '7px 12px', border: '1px solid var(--dsw-alias-border-l2)',
-        borderRadius: 'var(--dsw-radius-md)', font: 'inherit',
+        borderRadius: 'var(--dsw-radius-md)', font: 'inherit', cursor: 'pointer',
         color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-3)',
+      },
+      primaryButton: {
+        padding: '7px 16px', border: '1px solid transparent', fontWeight: 600, cursor: 'pointer',
+        borderRadius: 'var(--dsw-radius-md)', font: 'inherit',
+        color: 'var(--dsw-alias-label-primary-foreground)',
+        background: 'var(--dsw-alias-button-primary-fill)',
+      },
+      accentButton: {
+        padding: '7px 12px', cursor: 'pointer', fontWeight: 600, font: 'inherit',
+        borderRadius: 'var(--dsw-radius-md)',
+        color: 'var(--dsw-alias-brand-text)',
+        border: '1px solid var(--dsw-alias-brand-primary)',
+        background: 'var(--dsw-alias-interactive-bg-hover-accent)',
       },
       error: { margin: 0, color: 'var(--dsw-alias-label-error)', lineHeight: 1.6 },
       resting: {
@@ -991,7 +1122,10 @@ window.__ModuleLoader__.load({
     }
 
     /** Short description shown on the plugin card while no editor is open. */
-    const summary = '会话真正停下（无运行回合、无后台作业、无工作子代理）或目标受阻时响铃；铃声、音量与播放时长在这里设置。'
+    const summary = {
+      zh: '会话真正停下（无运行回合、无后台作业、无工作子代理）或目标受阻时响铃；铃声、音量、播放时长、安静规则与停止卡片都在这里设置。',
+      en: 'Ring when a session truly stops — no running turn, no live job, no working subagent — or when its goal becomes blocked. Chimes, volume, the playback window, quiet rules and the stop card live here.',
+    }
 
     /** Services Cordis activates before this bundle runs; `jobs` is optional. */
     const inject = { required: ['slots', 'configForms', 'sessions'], optional: ['jobs'] }
@@ -1121,92 +1255,135 @@ window.__ModuleLoader__.load({
         audio.stop()
       }, 'dsh-session-chime: audio unlock and stop-on-gesture')
 
+      // The platform locale service is optional: with it every string below renders in
+      // the active language (zh/en), without it Chinese is the fallback.
+      const locale = typeof ctx.get === 'function' ? (ctx.get('locale') as LocaleLike | undefined) : undefined
+      const t = (text: string | Text): string => (typeof text === 'string' ? text : locale !== undefined ? locale.resolveText(text) : text.zh)
+      const localeTick = createFlag(false)
+      if (locale !== undefined) {
+        ctx.effect(() => locale.subscribe(() => localeTick.set(!localeTick.getSnapshot())), 'dsh-session-chime: locale')
+      }
+
       const h = React.createElement
       function EditorView({ configForm }: { configForm: ConfigForm }): unknown {
         const [instance] = React.useState(() => createEditor(configForm))
         React.useEffect(() => instance.start(), [instance])
         const state = React.useSyncExternalStore(instance.subscribe, instance.getSnapshot, instance.getSnapshot)
+        // A locale switch must repaint these strings; the value itself is unused.
+        void React.useSyncExternalStore(localeTick.subscribe, localeTick.getSnapshot, localeTick.getSnapshot)
         if (state.status !== 'ready') {
           return h('p', { style: styles.hint, role: 'status' }, state.status === 'loading'
-            ? '正在读取插件配置…'
-            : '此插件当前未提供可编辑配置。')
+            ? t({ zh: '正在读取插件配置…', en: 'Reading this row’s configuration…' })
+            : t({ zh: '此插件当前未提供可编辑配置。', en: 'This plugin exposes no editable configuration.' }))
         }
         const disabled = !state.writable || state.saving
+
+        /** One labelled control with its hint. */
         function field(spec: FieldSpec): unknown {
           const id = 'dsh-session-chime-' + spec.key
           const value = state.values[spec.key]!
+          const label = h('span', { key: 'label', style: styles.label }, t(spec.label))
+          const hint = h('p', { key: 'hint', id: id + '-hint', style: styles.hint }, t(spec.hint))
+          let control: unknown
           if (spec.kind === 'boolean') {
-            return h('div', { key: spec.key, style: styles.field },
-              h('label', { style: styles.check, htmlFor: id },
-                h('input', {
-                  id, type: 'checkbox', checked: value === true, disabled,
-                  'aria-describedby': id + '-hint',
-                  onChange: (event: { target: { checked: boolean } }) => instance.edit(spec.key, event.target.checked),
-                }),
-                h('span', { style: styles.label }, spec.label)),
-              h('p', { id: id + '-hint', style: styles.hint }, spec.hint))
-          }
-          if (spec.kind === 'enum') {
-            return h('div', { key: spec.key, style: styles.field },
-              h('label', { htmlFor: id, style: styles.label }, spec.label),
-              h('select', {
-                id, style: styles.select, value: String(value), disabled,
-                'aria-describedby': id + '-hint',
-                onChange: (event: { target: { value: string } }) => instance.edit(spec.key, event.target.value),
-              }, (spec.choices ?? []).map(choice => h('option', { key: choice.value, value: choice.value }, choice.label))),
-              h('p', { id: id + '-hint', style: styles.hint }, spec.hint))
-          }
-          if (spec.kind === 'time') {
-            return h('div', { key: spec.key, style: styles.field },
-              h('label', { htmlFor: id, style: styles.label }, spec.label),
+            control = h('label', { style: styles.check, htmlFor: id },
               h('input', {
-                id, type: 'time', style: styles.number, value: String(value), disabled,
+                id, type: 'checkbox', checked: value === true, disabled,
+                style: styles.checkbox,
+                'aria-describedby': id + '-hint',
+                onChange: (event: { target: { checked: boolean } }) => instance.edit(spec.key, event.target.checked),
+              }),
+              h('span', { style: styles.switchText }, value === true
+                ? t({ zh: '已开启', en: 'On' })
+                : t({ zh: '已关闭', en: 'Off' })))
+          } else if (spec.kind === 'range') {
+            control = h('div', { style: styles.rangeRow },
+              h('input', {
+                id, type: 'range', min: spec.min, max: spec.max, step: spec.step, disabled,
+                style: styles.range, value: String(value),
                 'aria-describedby': id + '-hint',
                 onChange: (event: { target: { value: string } }) => instance.edit(spec.key, event.target.value),
               }),
-              h('p', { id: id + '-hint', style: styles.hint }, spec.hint))
-          }
-          return h('div', { key: spec.key, style: styles.field },
-            h('label', { htmlFor: id, style: styles.label }, spec.label),
-            h('input', {
-              id, type: 'number', min: spec.min, max: spec.max, step: spec.step, inputMode: 'decimal',
+              h('span', { style: styles.rangeValue }, String(value)))
+          } else if (spec.kind === 'enum') {
+            control = h('select', {
+              id, style: styles.select, value: String(value), disabled,
+              'aria-describedby': id + '-hint',
+              onChange: (event: { target: { value: string } }) => instance.edit(spec.key, event.target.value),
+            }, (spec.choices ?? []).map(choice => h('option', { key: choice.value, value: choice.value }, t(choice.label))))
+          } else {
+            control = h('input', {
+              id, type: spec.kind === 'time' ? 'time' : 'number',
+              min: spec.min, max: spec.max, step: spec.step, inputMode: 'decimal',
               style: styles.number, value: String(value), disabled,
               'aria-describedby': id + '-hint',
               onChange: (event: { target: { value: string } }) => instance.edit(spec.key, event.target.value),
-            }),
-            h('p', { id: id + '-hint', style: styles.hint }, spec.hint))
+            })
+          }
+          return h('div', { key: spec.key, style: styles.field },
+            spec.kind === 'boolean' ? h('div', { style: styles.switchRow }, label, control) : label,
+            spec.kind === 'boolean' ? undefined : control,
+            hint)
         }
+
+        const grouped = SECTIONS.map(section => ({
+          section,
+          fields: FIELDS.filter(spec => spec.section === section),
+        })).filter(group => group.fields.length > 0)
+
         return h('form', {
           style: styles.root,
-          'aria-label': '会话铃声设置',
+          'aria-label': t({ zh: '会话铃声设置', en: 'Session chime settings' }),
           'aria-busy': state.saving,
           onSubmit: (event: { preventDefault(): void }) => {
             event.preventDefault()
             void instance.save()
           },
         },
-        !state.writable && h('p', { style: styles.hint, role: 'status' }, '当前连接或配置文档为只读。'),
-        FIELDS.map(field),
-        h('p', { style: styles.hint }, '保存即生效：浏览器半边直接读这份配置，改铃声、音量或时长会在下一声立刻生效。'),
-        state.conflict && !state.error && h('p', { role: 'alert', style: styles.error }, '配置已更新；为避免覆盖他人的修改，请放弃草稿后重新编辑。'),
-        state.error && h('p', { role: 'alert', style: styles.error }, state.error),
-        h('div', { style: styles.actions },
-          h('button', { type: 'submit', style: styles.button, disabled: disabled || !state.dirty || state.conflict }, state.saving ? '正在保存…' : '保存'),
-          h('button', { type: 'button', style: styles.button, disabled: state.saving || !state.dirty, onClick: () => instance.discard() }, '放弃草稿'),
-          h('button', { type: 'button', style: styles.button, disabled, onClick: () => instance.reset() }, '恢复默认（保存后生效）'),
+        h('header', { key: 'header', style: styles.header },
+          h('span', { key: 'badge', style: styles.headerBadge }, '🔔'),
+          h('div', { key: 'copy', style: styles.headerCopy },
+            h('h2', { key: 'title', style: styles.title }, t({ zh: '会话铃声', en: 'Session chime' })),
+            h('p', { key: 'subtitle', style: styles.subtitle }, t({
+              zh: '会话真正停下（无运行回合、无后台作业、无工作子代理）或目标受阻时响铃；铃声与安静规则在这里设置，保存即生效。',
+              en: 'Ring when a session truly stops — no running turn, no live job, no working subagent — or when its goal becomes blocked. Everything here applies the moment you save.',
+            })))),
+        !state.writable && h('p', { key: 'readonly', style: styles.hint, role: 'status' }, t({
+          zh: '当前连接或配置文档为只读。',
+          en: 'This connection or configuration document is read-only.',
+        })),
+        grouped.map(group => h('section', { key: group.section.en, style: styles.card },
+          h('h3', { key: 'title', style: styles.sectionTitle }, t(group.section)),
+          group.fields.map(field))),
+        h('p', { key: 'note', style: styles.hint }, t({
+          zh: '保存即生效：浏览器半边直接读这份配置，改铃声、音量或时长会在下一声立刻生效。',
+          en: 'Saved values apply at once: the browser half reads this row directly, so the next chime already uses them.',
+        })),
+        state.conflict && !state.error && h('p', { key: 'conflict', role: 'alert', style: styles.error }, t({
+          zh: '配置已更新；为避免覆盖他人的修改，请放弃草稿后重新编辑。',
+          en: 'The configuration changed elsewhere. Discard the draft before editing again so nobody’s edit is overwritten.',
+        })),
+        state.error && h('p', { key: 'error', role: 'alert', style: styles.error }, state.error),
+        h('div', { key: 'actions', style: styles.actions },
+          h('button', { type: 'submit', style: disabled || !state.dirty || state.conflict ? styles.button : styles.primaryButton, disabled: disabled || !state.dirty || state.conflict },
+            state.saving ? t({ zh: '正在保存…', en: 'Saving…' }) : t({ zh: '保存', en: 'Save' })),
+          h('button', { type: 'button', style: styles.button, disabled: state.saving || !state.dirty, onClick: () => instance.discard() },
+            t({ zh: '放弃草稿', en: 'Discard' })),
+          h('button', { type: 'button', style: styles.button, disabled, onClick: () => instance.reset() },
+            t({ zh: '恢复默认（保存后生效）', en: 'Reset to defaults' })),
           h('button', {
-            type: 'button', style: styles.button, disabled: state.saving,
+            type: 'button', style: styles.accentButton, disabled: state.saving,
             onClick: () => {
               audio.unlock()
               // The preview obeys the live settings, quiet rules included, and shows
               // the same stop banner the real ring would.
-              playRing('done', { id: 'preview', title: '（试听）' }, String(state.values.soundDone ?? 'chime-soft'))
+              playRing('done', { id: 'preview', title: t({ zh: '（试听）', en: '(preview)' }) }, String(state.values.soundDone ?? 'chime-soft'))
             },
-          }, '试听完成音')))
+          }, t({ zh: '试听完成音', en: 'Preview the chime' }))))
       }
 
       function ConfigView(props: { view?: string; configForm: ConfigForm }): unknown {
-        return props.view === 'summary' ? summary : h(EditorView, { configForm: props.configForm })
+        return props.view === 'summary' ? t(summary) : h(EditorView, { configForm: props.configForm })
       }
 
       ctx.effect(() => ctx.configForms.whileServed?.([ROW_ID], () => ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
@@ -1281,20 +1458,35 @@ window.__ModuleLoader__.load({
         const minSeconds = Math.max(0, Math.round(latest.minRingMs / 1000))
         const masked = latest.bannerPlacement === 'modal'
         const hint = masked
-          ? `铃声会响到 ${seconds} 秒用完。这个位置带遮罩：只能点下面的按钮结束铃声并关闭它。`
+          ? t({
+            zh: `铃声会响到 ${seconds} 秒用完。这个位置带遮罩：只能点下面的按钮结束铃声并关闭它。`,
+            en: `The chime runs for ${seconds} s. This position is masked: only the button below ends it and clears the card.`,
+          })
           : minSeconds > 0
-            ? `铃声会响到 ${seconds} 秒用完；响够 ${minSeconds} 秒后，点一下页面或按任意键也会停。`
-            : `铃声会响到 ${seconds} 秒用完；点一下页面或按任意键也会停。`
+            ? t({
+              zh: `铃声会响到 ${seconds} 秒用完；响够 ${minSeconds} 秒后，点一下页面或按任意键也会停。`,
+              en: `The chime runs for ${seconds} s; after ${minSeconds} s, a click or key press also stops it.`,
+            })
+            : t({
+              zh: `铃声会响到 ${seconds} 秒用完；点一下页面或按任意键也会停。`,
+              en: `The chime runs for ${seconds} s; a click or key press also stops it.`,
+            })
+        // Green for a clean finish, amber for a blocked goal: the accent is the
+        // fastest way to read which one happened.
+        const accent = done ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-warn-primary)'
         const card = h('div', {
-          style: masked ? styles.bannerCard : bannerFrame(latest.bannerPlacement),
+          style: { ...(masked ? styles.bannerCard : bannerFrame(latest.bannerPlacement)), borderLeft: '3px solid ' + accent },
           role: 'status',
           'aria-live': 'polite',
         },
         h('div', { style: styles.bannerText },
-          h('strong', null, done ? '🔔 会话已完成' : '⚠️ 目标受阻'),
+          h('strong', { style: { color: accent } }, done
+            ? t({ zh: '🔔 会话已完成', en: '🔔 Session finished' })
+            : t({ zh: '⚠️ 目标受阻', en: '⚠️ Goal blocked' })),
           h('span', { style: styles.bannerTitle }, entry.title === '' ? entry.sessionId : entry.title),
           h('span', { style: styles.hint }, hint)),
-        h('button', { type: 'button', style: styles.bannerButton, onClick: () => stopRing() }, '停止铃声'))
+        h('button', { type: 'button', style: styles.primaryButton, onClick: () => stopRing() },
+          t({ zh: '停止铃声', en: 'Stop the chime' })))
         if (!masked) return card
         // The mask swallows every pointer event on purpose; the layer is still
         // click-through for the rest of the shell because only the mask opts in.
