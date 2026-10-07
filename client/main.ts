@@ -42,6 +42,7 @@ window.__ModuleLoader__.load({
     type JobRow = import('./public.js').JobRow
     type PathOperation = import('./public.js').PathOperation
     type ReactRuntime = import('./public.js').ReactRuntime
+    type RingInfo = import('./public.js').RingInfo
     type SessionListSnapshot = import('./public.js').SessionListSnapshot
 
     const React = require('react') as ReactRuntime
@@ -99,7 +100,7 @@ window.__ModuleLoader__.load({
       setTimer(callback: () => void, delayMs: number): unknown
       clearTimer(handle: unknown): void
       readSettings(): ChimeSettings
-      ring(reason: ChimeReason): void
+      ring(reason: ChimeReason, session: { id: string; title: string }): void
       watch(sessionId: string): void
       unwatch(sessionId: string): void
     }): { update(sessions: SessionListSnapshot, jobs: { readonly rows: Readonly<Record<string, readonly JobRow[]>> } | undefined): void } {
@@ -120,6 +121,8 @@ window.__ModuleLoader__.load({
         watched: boolean
         /** Latest observation, kept so the debounced check reads fresh numbers. */
         observation: { running: boolean; liveJobs: number; liveChildren: number; goalPhase: string | null }
+        /** Human-facing label, so the banner can name the session. */
+        title: string
       }
 
       const tracked = new Map<string, Tracked>()
@@ -147,6 +150,14 @@ window.__ModuleLoader__.load({
         return live
       }
 
+      /** The catalog's human-facing label for one row. */
+      function titleOf(row: unknown): string {
+        const source = row as { displayTitle?: unknown; title?: unknown; id?: unknown } | undefined
+        if (typeof source?.displayTitle === 'string' && source.displayTitle !== '') return source.displayTitle
+        if (typeof source?.title === 'string' && source.title !== '') return source.title
+        return typeof source?.id === 'string' ? source.id : ''
+      }
+
       /** The session's current goal phase, absent when it has no goal capability or no goal. */
       function phaseOf(row: unknown): string | null {
         const values = (row as { projectionValues?: { goal?: { goal?: { phase?: unknown } } | null } } | undefined)?.projectionValues
@@ -162,7 +173,7 @@ window.__ModuleLoader__.load({
         if (state.notified) return
         if (!isSettled(state.observation)) return
         state.notified = true
-        deps.ring('done')
+        deps.ring('done', { id: sessionId, title: state.title })
       }
 
       /** Schedule the debounced settle check for one session. */
@@ -200,7 +211,7 @@ window.__ModuleLoader__.load({
             if (state === undefined) {
               state = {
                 running: undefined, phase: null, sawBusy: false, notified: false,
-                lastBusyAt: 0, timer: undefined, watched: false,
+                lastBusyAt: 0, timer: undefined, watched: false, title: titleOf(row),
                 observation: { running: false, liveJobs: 0, liveChildren: 0, goalPhase: null },
               }
               tracked.set(sessionId, state)
@@ -208,6 +219,7 @@ window.__ModuleLoader__.load({
 
             const running = row.running === true
             const phase = phaseOf(row)
+            state.title = titleOf(row)
             state.observation = {
               running,
               liveJobs: liveJobsOf(sessionId, jobs),
@@ -238,7 +250,9 @@ window.__ModuleLoader__.load({
             }
 
             // A blocked goal is a stop in its own right and rings at once.
-            if (phase === 'blocked' && state.phase !== 'blocked' && state.phase !== null) deps.ring('blocked')
+            if (phase === 'blocked' && state.phase !== 'blocked' && state.phase !== null) {
+              deps.ring('blocked', { id: sessionId, title: state.title })
+            }
             state.phase = phase
 
             if (running) {
@@ -278,6 +292,53 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** A tiny observable holding the ring the banner describes. */
+    function createBanner(): {
+      getSnapshot(): RingInfo | undefined
+      subscribe(listener: () => void): () => void
+      show(entry: RingInfo): void
+      hide(seq: number): void
+    } {
+      const listeners = new Set<() => void>()
+      let value: RingInfo | undefined
+      const publish = (next: RingInfo | undefined): void => {
+        value = next
+        for (const listener of listeners) listener()
+      }
+      return {
+        getSnapshot: () => value,
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => {
+            listeners.delete(listener)
+          }
+        },
+        show(entry) {
+          publish(entry)
+        },
+        hide(seq) {
+          // A newer ring owns the banner; an older promise must not clear it.
+          if (value !== undefined && value.seq === seq) publish(undefined)
+        },
+      }
+    }
+
+    /**
+     * Whether a gesture may stop the ring that started at `startedAt`.
+     *
+     * The shortest-ring guard is what keeps a long ring audible: activity before
+     * `minRingMs` is ignored, so the chime is always heard for at least that long.
+     * The banner's own stop button never goes through this test.
+     *
+     * @param startedAt - page wall-clock ms of the ring, or undefined when silent.
+     * @param now - current page wall-clock ms.
+     * @param minRingMs - configured shortest ring.
+     * @returns true when a gesture may stop the ring.
+     */
+    function shouldStopOnGesture(startedAt: number | undefined, now: number, minRingMs: number): boolean {
+      return startedAt !== undefined && now - startedAt >= minRingMs
+    }
+
     /** Decode one embedded data URL into raw bytes. */
     function decodeBase64(data: string): ArrayBuffer {
       const comma = data.indexOf(',')
@@ -292,7 +353,7 @@ window.__ModuleLoader__.load({
      * id, and a playback window that repeats a short chime when the saved duration
      * asks for longer than the clip.
      */
-    function createAudio(readSettings: () => ChimeSettings): { unlock(): void; play(id: string): Promise<void>; stop(): void } {
+    function createAudio(readSettings: () => ChimeSettings): { unlock(): void; play(id: string, windowMs: number): Promise<void>; stop(): void } {
       let context: AudioContext | undefined
       let stopCurrent: (() => void) | undefined
       const buffers = new Map<string, AudioBuffer>()
@@ -323,76 +384,93 @@ window.__ModuleLoader__.load({
         stop() {
           stopCurrent?.()
         },
-        async play(id) {
-          const spec = __CHIME_SOUNDS[id]
-          if (spec === undefined) return
-          const audio = ensure()
-          if (audio === undefined) return
-          if (audio.state === 'suspended') {
-            try {
-              await audio.resume()
-            } catch {
-              // A blocked context stays silent; the next gesture retries.
-            }
-          }
-          let buffer = buffers.get(id)
-          if (buffer === undefined) {
-            try {
-              buffer = await audio.decodeAudioData(decodeBase64(spec.data))
-            } catch {
+        /**
+         * Play one chime for one window.
+         *
+         * One ring at a time: a new chime replaces whatever is still playing, and a
+         * long window is filled by replaying the clip until it runs out.
+         *
+         * @param id - shipped chime id.
+         * @param windowMs - playback window decided by the caller.
+         * @returns a promise resolving when the ring ends, however it ends.
+         */
+        play(id, windowMs) {
+          return new Promise<void>(resolve => {
+            const spec = __CHIME_SOUNDS[id]
+            if (spec === undefined || windowMs <= 0) {
+              resolve()
               return
             }
-            buffers.set(id, buffer)
-          }
-          const settings = readSettings()
-          const windowMs = effectiveWindowMs(settings, buffer!.duration * 1000, new Date())
-          if (windowMs <= 0) return
-
-          // One ring at a time: a new chime replaces whatever is still playing, and
-          // a long window is filled by replaying the clip until it runs out.
-          stopCurrent?.()
-          const gain = audio.createGain()
-          gain.gain.value = Math.max(0, Math.min(1, settings.volume))
-          gain.connect(audio.destination)
-          let cancelled = false
-          let timer: ReturnType<typeof setTimeout> | undefined
-          let source: AudioBufferSourceNode | undefined
-          const deadline = Date.now() + windowMs
-          const finish = (): void => {
-            if (cancelled) return
-            cancelled = true
-            if (timer !== undefined) clearTimeout(timer)
-            timer = undefined
-            try {
-              source?.stop()
-            } catch {
-              // Already ended.
-            }
-            source = undefined
-            try {
-              gain.disconnect()
-            } catch {
-              // The context may already be gone; nothing to release.
-            }
-            if (stopCurrent === finish) stopCurrent = undefined
-          }
-          stopCurrent = finish
-          const step = (): void => {
-            if (cancelled) return
-            const remainingMs = deadline - Date.now()
-            if (remainingMs <= 0) {
-              finish()
-              return
-            }
-            const sliceSeconds = Math.min(buffer!.duration, remainingMs / 1000)
-            source = audio!.createBufferSource()
-            source.buffer = buffer!
-            source.connect(gain)
-            source.start(0, 0, sliceSeconds)
-            const nextMs = sliceSeconds * 1000 + REPEAT_GAP_SECONDS * 1000
-            timer = setTimeout(remainingMs > nextMs ? step : finish, remainingMs > nextMs ? nextMs : remainingMs + 20)
-          }
-          step()
+            void (async () => {
+              const audio = ensure()
+              if (audio === undefined) {
+                resolve()
+                return
+              }
+              if (audio.state === 'suspended') {
+                try {
+                  await audio.resume()
+                } catch {
+                  // A blocked context stays silent; the next gesture retries.
+                }
+              }
+              let buffer = buffers.get(id)
+              if (buffer === undefined) {
+                try {
+                  buffer = await audio.decodeAudioData(decodeBase64(spec.data))
+                } catch {
+                  resolve()
+                  return
+                }
+                buffers.set(id, buffer)
+              }
+              stopCurrent?.()
+              const settings = readSettings()
+              const gain = audio.createGain()
+              gain.gain.value = Math.max(0, Math.min(1, settings.volume))
+              gain.connect(audio.destination)
+              let cancelled = false
+              let timer: ReturnType<typeof setTimeout> | undefined
+              let source: AudioBufferSourceNode | undefined
+              const deadline = Date.now() + windowMs
+              const finish = (): void => {
+                if (cancelled) return
+                cancelled = true
+                if (timer !== undefined) clearTimeout(timer)
+                timer = undefined
+                try {
+                  source?.stop()
+                } catch {
+                  // Already ended.
+                }
+                source = undefined
+                try {
+                  gain.disconnect()
+                } catch {
+                  // The context may already be gone; nothing to release.
+                }
+                if (stopCurrent === finish) stopCurrent = undefined
+                resolve()
+              }
+              stopCurrent = finish
+              const step = (): void => {
+                if (cancelled) return
+                const remainingMs = deadline - Date.now()
+                if (remainingMs <= 0) {
+                  finish()
+                  return
+                }
+                const sliceSeconds = Math.min(buffer!.duration, remainingMs / 1000)
+                source = audio!.createBufferSource()
+                source.buffer = buffer!
+                source.connect(gain)
+                source.start(0, 0, sliceSeconds)
+                const nextMs = sliceSeconds * 1000 + REPEAT_GAP_SECONDS * 1000
+                timer = setTimeout(remainingMs > nextMs ? step : finish, remainingMs > nextMs ? nextMs : remainingMs + 20)
+              }
+              step()
+            })()
+          })
         },
       }
     }
@@ -562,6 +640,16 @@ window.__ModuleLoader__.load({
         hint: '打开后一直按上面的安静规则处理；也可以点侧边栏底部的按钮直接切换。',
         seed: value => booleanOf(value, 'restMode', false),
       },
+      {
+        key: 'minRingMs', kind: 'number', label: '最短响铃（毫秒）', hint: '在这之前鼠标/键盘活动不会打断铃声，保证长响铃至少被听到这么久；卡片上的“停止铃声”按钮不受限制。默认 3000。',
+        min: 0, step: 500, parse: parseDuration,
+        seed: value => numberOf(value, 'minRingMs', 3000),
+      },
+      {
+        key: 'banner', kind: 'boolean', label: '响铃时显示停止卡片',
+        hint: '在界面下方弹出卡片，写明是哪个会话完成/受阻，并带一个“停止铃声”按钮。',
+        seed: value => booleanOf(value, 'banner', true),
+      },
     ]
 
     /** Field names in display order. */
@@ -605,6 +693,9 @@ window.__ModuleLoader__.load({
       const duration = raw.durationMs
       const debounce = raw.debounceMs
       const short = raw.quietShortMs
+      const minRing = typeof raw.minRingMs === 'number' && Number.isSafeInteger(raw.minRingMs) && raw.minRingMs >= 0
+        ? Math.min(raw.minRingMs, MAX_WINDOW_MS)
+        : 3000
       return {
         enabled: booleanOf(value, 'enabled', true),
         soundDone: soundOf(value, 'soundDone', 'chime-soft'),
@@ -617,6 +708,8 @@ window.__ModuleLoader__.load({
         dndStart: clockOf(value, 'dndStart'),
         dndEnd: clockOf(value, 'dndEnd'),
         restMode: booleanOf(value, 'restMode', false),
+        minRingMs: minRing,
+        banner: booleanOf(value, 'banner', true),
       }
     }
 
@@ -823,6 +916,23 @@ window.__ModuleLoader__.load({
         borderRadius: 'var(--dsw-radius-md)', font: 'inherit',
         color: 'var(--dsw-alias-label-secondary)', background: 'var(--dsw-alias-bg-layer-2)',
       },
+      banner: {
+        position: 'fixed', left: '50%', bottom: 28, transform: 'translateX(-50%)',
+        zIndex: 40, display: 'flex', gap: 18, alignItems: 'center',
+        maxWidth: 'min(560px, calc(100vw - 48px))', padding: '16px 20px',
+        border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 'var(--dsw-radius-lg)',
+        background: 'var(--dsw-alias-bg-layer-1)', boxShadow: '0 12px 32px rgba(0, 0, 0, 0.28)',
+        color: 'var(--dsw-alias-label-primary)',
+        // The overlay layer is click-through; the card opts back in.
+        pointerEvents: 'auto',
+      },
+      bannerText: { display: 'grid', gap: 4, fontSize: 13, lineHeight: 1.5 },
+      bannerTitle: { fontWeight: 600, fontSize: 15, wordBreak: 'break-word' },
+      bannerButton: {
+        flexShrink: 0, padding: '10px 18px', border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-md)', font: 'inherit', fontWeight: 600, cursor: 'pointer',
+        color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-3)',
+      },
     }
 
     /** Short description shown on the plugin card while no editor is open. */
@@ -848,6 +958,46 @@ window.__ModuleLoader__.load({
 
       const jobs = typeof ctx.get === 'function' ? (ctx.get('jobs') as import('./public.js').JobsService | undefined) : undefined
       const releases = new Map<string, () => void>()
+      const banner = createBanner()
+      /** The ring currently playing, if any; the banner and the min-ring guard read it. */
+      let activeRing: RingInfo | undefined
+      let ringSeq = 0
+
+      /**
+       * Start one ring: decide its window from the live settings, remember it, put
+       * the banner up and play.
+       *
+       * @param reason - why the chime plays; drives which sound and what the banner says.
+       * @param session - the session that settled, or a preview placeholder.
+       * @param soundId - the chime to play.
+       */
+      function playRing(reason: ChimeReason, session: { id: string; title: string }, soundId: string): void {
+        const settings = latest
+        const clipMs = __CHIME_SOUNDS[soundId]?.durationMs ?? 0
+        const windowMs = effectiveWindowMs(settings, clipMs, new Date())
+        if (windowMs <= 0) return
+        ringSeq += 1
+        const entry: RingInfo = {
+          seq: ringSeq, reason, sessionId: session.id, title: session.title,
+          startedAt: Date.now(), soundId, windowMs,
+        }
+        activeRing = entry
+        if (settings.banner) banner.show(entry)
+        void audio.play(soundId, windowMs).then(() => {
+          if (activeRing !== undefined && activeRing.seq === entry.seq) {
+            activeRing = undefined
+            banner.hide(entry.seq)
+          }
+        })
+      }
+
+      /** Silence everything and take the banner down. */
+      function stopRing(): void {
+        const entry = activeRing
+        activeRing = undefined
+        audio.stop()
+        if (entry !== undefined) banner.hide(entry.seq)
+      }
 
       const watcher = createWatcher({
         now: () => Date.now(),
@@ -856,10 +1006,8 @@ window.__ModuleLoader__.load({
           clearTimeout(handle as ReturnType<typeof setTimeout>)
         },
         readSettings: () => latest,
-        ring(reason) {
-          const settings = latest
-          if (!settings.enabled) return
-          void audio.play(reason === 'blocked' ? settings.soundBlocked : settings.soundDone)
+        ring(reason, session) {
+          playRing(reason, session, reason === 'blocked' ? latest.soundBlocked : latest.soundDone)
         },
         watch(sessionId) {
           if (jobs === undefined || releases.has(sessionId)) return
@@ -903,12 +1051,12 @@ window.__ModuleLoader__.load({
         }
       }, 'dsh-session-chime: session watcher')
 
-      // Browsers keep audio suspended until the user interacts. Every gesture also
-      // stops a ringing chime: a long window is a legitimate setting, but the first
-      // click or key press means the human is back and has heard it.
+      // Browsers keep audio suspended until the user interacts. Past the shortest-ring
+      // guard, a gesture also stops a ringing chime: a long window is a legitimate
+      // setting, but a click or key press means the human is back and has heard it.
       const onGesture = (): void => {
         audio.unlock()
-        audio.stop()
+        if (shouldStopOnGesture(activeRing?.startedAt, Date.now(), latest.minRingMs)) stopRing()
       }
       window.addEventListener('pointerdown', onGesture, { capture: true, passive: true })
       window.addEventListener('keydown', onGesture, { capture: true, passive: true })
@@ -995,7 +1143,9 @@ window.__ModuleLoader__.load({
             type: 'button', style: styles.button, disabled: state.saving,
             onClick: () => {
               audio.unlock()
-              void audio.play(String(state.values.soundDone ?? 'chime-soft'))
+              // The preview obeys the live settings, quiet rules included, and shows
+              // the same stop banner the real ring would.
+              playRing('done', { id: 'preview', title: '（试听）' }, String(state.values.soundDone ?? 'chime-soft'))
             },
           }, '试听完成音')))
       }
@@ -1042,6 +1192,29 @@ window.__ModuleLoader__.load({
         order: 50,
         label: () => '休息模式',
       }, RestModeSwitch)), 'dsh-session-chime: rest-mode switch')
+
+      /** The frame-wide card that names the finished session and offers the stop button. */
+      function ChimeBanner(): unknown {
+        const entry = React.useSyncExternalStore(banner.subscribe, banner.getSnapshot, banner.getSnapshot)
+        if (entry === undefined) return null
+        const done = entry.reason === 'done'
+        const seconds = Math.max(1, Math.round(entry.windowMs / 1000))
+        const minSeconds = Math.max(0, Math.round(latest.minRingMs / 1000))
+        return h('div', { style: styles.banner, role: 'status', 'aria-live': 'polite' },
+          h('div', { style: styles.bannerText },
+            h('strong', null, done ? '🔔 会话已完成' : '⚠️ 目标受阻'),
+            h('span', { style: styles.bannerTitle }, entry.title === '' ? entry.sessionId : entry.title),
+            h('span', { style: styles.hint }, minSeconds > 0
+              ? `铃声会响到 ${seconds} 秒用完；响够 ${minSeconds} 秒后，点一下页面或按任意键也会停。`
+              : `铃声会响到 ${seconds} 秒用完；点一下页面或按任意键也会停。`)),
+          h('button', { type: 'button', style: styles.bannerButton, onClick: () => stopRing() }, '停止铃声'))
+      }
+
+      ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+        name: 'shell.overlay',
+        id: 'session-chime-banner',
+        order: 100,
+      }, ChimeBanner)), 'dsh-session-chime: stop banner')
     }
 
     // The shell reads named exports off the factory result, exactly like the
@@ -1060,6 +1233,7 @@ window.__ModuleLoader__.load({
     exported.inQuietHours = inQuietHours
     exported.effectiveWindowMs = effectiveWindowMs
     exported.checkTime = checkTime
+    exported.shouldStopOnGesture = shouldStopOnGesture
     exported.summary = summary
     exported.ROW_ID = ROW_ID
     exported.FIELDS = FIELDS.map(field => field.key)

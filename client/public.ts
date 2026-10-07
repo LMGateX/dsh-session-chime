@@ -40,6 +40,10 @@ export interface ObservableSnapshot<T> {
 /** One session row as the client session catalog publishes it. */
 export interface SessionRow {
   readonly id?: string
+  /** Human-facing label the catalog projects. */
+  readonly displayTitle?: string
+  /** Durable title, when the host has projected one. */
+  readonly title?: string
   readonly running?: boolean
   readonly parentId?: string
   readonly origin?: string
@@ -128,6 +132,28 @@ export interface ChimeSettings {
   readonly dndStart: string
   readonly dndEnd: string
   readonly restMode: boolean
+  /** Shortest ring before pointer or key activity may stop it. */
+  readonly minRingMs: number
+  /** Whether a ring shows the stop banner. */
+  readonly banner: boolean
+}
+
+/** What the banner shows about the ring it belongs to. */
+export interface RingInfo {
+  /** Monotonic per-page id, so a replaced ring cannot clear its successor's banner. */
+  readonly seq: number
+  /** Why the chime played. */
+  readonly reason: ChimeReason
+  /** Session that settled. */
+  readonly sessionId: string
+  /** Human-facing session label. */
+  readonly title: string
+  /** Page wall-clock ms when the ring started. */
+  readonly startedAt: number
+  /** The sound being played. */
+  readonly soundId: string
+  /** Playback window in milliseconds. */
+  readonly windowMs: number
 }
 
 /** Shipped chime ids, mirrored by src/config.ts and asserted by npm run check:bundle. */
@@ -149,4 +175,6 @@ export const DEFAULT_SETTINGS: ChimeSettings = {
   dndStart: '',
   dndEnd: '',
   restMode: false,
+  minRingMs: 3000,
+  banner: true,
 }

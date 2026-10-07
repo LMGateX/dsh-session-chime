@@ -71,6 +71,10 @@ export interface RowConfig {
   readonly dndEnd?: Live<string>
   /** Rest mode: treat every chime as if it were inside the do-not-disturb window. */
   readonly restMode?: Live<boolean>
+  /** Shortest ring before pointer or key activity may stop it. */
+  readonly minRingMs?: Live<number>
+  /** Whether a ring shows the stop banner. */
+  readonly banner?: Live<boolean>
 }
 
 /** Plain row configuration, as tests and hand-written compositions pass it. */
@@ -97,6 +101,10 @@ export interface RowConfigInput {
   readonly dndEnd?: string
   /** Rest mode: treat every chime as if it were inside the do-not-disturb window. */
   readonly restMode?: boolean
+  /** Shortest ring before pointer or key activity may stop it. */
+  readonly minRingMs?: number
+  /** Whether a ring shows the stop banner. */
+  readonly banner?: boolean
 }
 
 /** Validated row configuration with every default applied. */
@@ -112,12 +120,14 @@ export interface ResolvedRowConfig {
   readonly dndStart: string
   readonly dndEnd: string
   readonly restMode: boolean
+  readonly minRingMs: number
+  readonly banner: boolean
 }
 
 /** Configuration keys this row accepts; anything else is a composition error. */
 export const knownRowKeys: readonly string[] = [
   'enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs',
-  'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode',
+  'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode', 'minRingMs', 'banner',
 ]
 
 /**
@@ -194,6 +204,14 @@ export const Config = Schema.object({
     '休息模式：打开后等同于一直处于勿扰时段（按上面的方式短响或静默）；这个开关也可以从侧边栏底部的按钮直接切换。' +
     ' Rest mode: while on, every chime is treated as inside the do-not-disturb window. The sidebar footer button toggles it directly.',
   )),
+  minRingMs: live(Schema.natural().default(3000).description(
+    '最短响铃（毫秒）：在这之前鼠标/键盘活动不会打断铃声，保证长响铃至少被听到这么久；卡片上的“停止铃声”按钮不受此限制。' +
+    ' Shortest ring in ms: pointer or key activity cannot stop a chime before this, so a long ring is always heard; the banner stop button ignores it.',
+  )),
+  banner: live(Schema.boolean().default(true).description(
+    '响铃时在界面上弹出提示卡，写明是哪个会话完成/受阻，并带一个“停止铃声”按钮。' +
+    ' Show a stop banner while ringing: it names the session and offers one big stop button.',
+  )),
 })
 
 /**
@@ -219,6 +237,8 @@ export function resolveRowConfig(config: RowConfig | RowConfigInput = {}): Resol
     dndStart: optionalClock('dndStart', liveValue(config.dndStart)) ?? '',
     dndEnd: optionalClock('dndEnd', liveValue(config.dndEnd)) ?? '',
     restMode: optionalBoolean('restMode', liveValue(config.restMode)) ?? false,
+    minRingMs: optionalDuration('minRingMs', liveValue(config.minRingMs)) ?? 3000,
+    banner: optionalBoolean('banner', liveValue(config.banner)) ?? true,
   }
 }
 

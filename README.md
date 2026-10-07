@@ -48,6 +48,8 @@ dsh profile install https://github.com/LMGateX/dsh-session-chime/releases/downlo
 | `dndStart` | 空 | 勿扰时段开始（本地时间 `HH:mm`），留空＝不启用 |
 | `dndEnd` | 空 | 勿扰时段结束；结束早于开始表示跨午夜（`22:00`→`08:00`） |
 | `restMode` | `false` | 休息模式：一直按上面的安静规则处理 |
+| `minRingMs` | `3000` | 最短响铃：在这之前鼠标/键盘活动不会打断；卡片按钮不受限制 |
+| `banner` | `true` | 响铃时弹出停止卡片（写清哪个会话、带"停止铃声"按钮） |
 
 六个铃声（全部 CC0，来自 Kenney "Interface Sounds"）：`chime-soft` 柔和双音、`bell-bright` 清脆铃、`marimba` 木琴上行、`alert-low` 低沉警示、`alert-sharp` 短促警示、`blip` 轻点。设置页里点击 **试听完成音** 可以直接听。
 
@@ -60,13 +62,24 @@ dsh profile install https://github.com/LMGateX/dsh-session-chime/releases/downlo
 
 安静期间 `short`＝只响 `quietShortMs`（默认 600ms），`silent`＝完全不响。
 
-## 长响铃怎么停
+## 响铃时怎么停
 
-`durationMs` 可以设到 6 小时——短铃声会按 ~120ms 间隔重复到时长用完。这么长的响铃当然要能停：
+`durationMs` 可以设到 6 小时——短铃声会按 ~120ms 间隔重复到时长用完。这么长的响铃有三条停下来的路：
 
-- **点一下页面或按任意键就停**（这一下同时解锁浏览器音频，是同一个手势监听）；
-- 设置页的"试听完成音"按钮重新试听；
-- 新的铃声会顶掉正在响的那一个（同一时刻只有一声）。
+1. **卡片上的"停止铃声"按钮**（显式停止，**不受最短响铃限制，点下去立刻停**）。响铃时界面下方会浮出一张卡片：
+
+   ```
+   🔔 会话已完成
+   修复登录
+   铃声会响到 60 秒用完；响够 3 秒后，点一下页面或按任意键也会停。
+                                    [ 停止铃声 ]
+   ```
+
+   它注册在公开 slot `shell.overlay`（list 型、叠加式、不替换自带项）；这一层本身点击穿透，只有卡片自己接管指针事件，所以不会挡住底下的操作。可以用 `banner` 关掉整张卡片。
+2. **隐式的鼠标/键盘活动**：点一下页面或按任意键就停——但要先响够 `minRingMs`（默认 3000ms，即"最短响铃"），避免刚响就被你自己无意识的动作掐掉。这一下同时解锁浏览器音频（同一个手势监听）。
+3. **自然结束**：`durationMs` 用完。
+
+新铃声会顶掉正在响的那一声（同一时刻只有一声）；设置页的"试听完成音"走同一条路径，因此也能预览这张卡片。
 
 ## 浏览器音频的两条现实约束
 
@@ -90,12 +103,12 @@ npm run build        # lib/ + client/client.js
 
 仓库结构：
 
-- `src/config.ts` — 设置页渲染的 Schemastery schema（十一个字段全部 volatile）。
+- `src/config.ts` — 设置页渲染的 Schemastery schema（十三个字段全部 volatile）。
 - `src/index.ts` — host 半边：只发布 schema，不挂任何监听、不起定时器。
 - `client/main.ts` — 浏览器半边：会话监听、判定、播放、设置表单。
 - `client/sounds.generated.js` — 由 `scripts/generate-sounds.ts` 生成的声音表（base64 WAV）。
 - `scripts/build-client.mjs` — 把声音表与编译后的 `client/main.js` 拼成一个 classic script `client/client.js`。
-- `scripts/check-settings-form.mjs` — 用**真实安装的** `@deepseek-ai/dsh-settings` 跑 `describe()`，证明插件页会渲染出这十一个控件。
+- `scripts/check-settings-form.mjs` — 用**真实安装的** `@deepseek-ai/dsh-settings` 跑 `describe()`，证明插件页会渲染出这十三个控件。
 
 ## English
 

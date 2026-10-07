@@ -23,7 +23,7 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = dirname(dirname(new URL(import.meta.url).pathname))
-const EXPECTED_FIELDS = ['enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs', 'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode']
+const EXPECTED_FIELDS = ['enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs', 'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode', 'minRingMs', 'banner']
 const EXPECTED_SOUNDS = ['chime-soft', 'bell-bright', 'marimba', 'alert-low', 'alert-sharp', 'blip']
 const failures = []
 const check = (ok, message) => {
@@ -128,6 +128,8 @@ if (fiber !== undefined) {
       check(node('dndStart').meta?.default === '', 'dndStart default is ' + JSON.stringify(node('dndStart').meta?.default))
       check(node('dndEnd').meta?.default === '', 'dndEnd default is ' + JSON.stringify(node('dndEnd').meta?.default))
       check(node('restMode').meta?.default === false, 'restMode default is ' + JSON.stringify(node('restMode').meta?.default))
+      check(node('minRingMs').meta?.default === 3000, 'minRingMs default is ' + JSON.stringify(node('minRingMs').meta?.default))
+      check(node('banner').meta?.default === true, 'banner default is ' + JSON.stringify(node('banner').meta?.default))
       console.log(JSON.stringify({
         ns: row.ns,
         applies: row.applies,
@@ -157,7 +159,7 @@ if (failures.length > 0) {
   for (const failure of failures) console.error('  - ' + failure)
   process.exit(1)
 }
-console.log('OK: the host settings service describes a live "session-chime" namespace with all eleven volatile fields,')
+console.log('OK: the host settings service describes a live "session-chime" namespace with all ' + EXPECTED_FIELDS.length + ' volatile fields,')
 console.log('    both chime unions and the shipped defaults; a saved chime passes the volatility check on the write path.')
 
 /** Resolve the dsh installation package.json behind the configured executable. */

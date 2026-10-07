@@ -33,6 +33,7 @@ interface ClientApi {
   inQuietHours(now: Date, start: string, end: string): boolean;
   effectiveWindowMs(settings: Record<string, unknown>, clipMs: number, now: Date): number;
   checkTime(text: string): string | undefined;
+  shouldStopOnGesture(startedAt: number | undefined, now: number, minRingMs: number): boolean;
   ROW_ID: string;
   FIELDS: string[];
   SOUND_IDS: string[];
@@ -94,13 +95,14 @@ function fakeClock() {
 }
 
 /** Build a session catalog snapshot from a compact description. */
-function sessionsOf(rows: Record<string, { running?: boolean; parentId?: string; origin?: string; phase?: string | null }>): SessionListSnapshot {
+function sessionsOf(rows: Record<string, { running?: boolean; parentId?: string; origin?: string; phase?: string | null; title?: string }>): SessionListSnapshot {
   const ids = Object.keys(rows);
   const byId: Record<string, Record<string, unknown>> = {};
   for (const id of ids) {
     const row = rows[id]!;
     byId[id] = {
       id,
+      displayTitle: row.title ?? 'session ' + id,
       running: row.running === true,
       ...(row.parentId === undefined ? {} : { parentId: row.parentId }),
       ...(row.origin === undefined ? {} : { origin: row.origin }),
@@ -113,6 +115,7 @@ function sessionsOf(rows: Record<string, { running?: boolean; parentId?: string;
 interface Harness {
   clock: ReturnType<typeof fakeClock>;
   rings: Reason[];
+  ringed: { reason: Reason; id: string; title: string }[];
   watched: string[];
   released: string[];
   update(sessions: SessionListSnapshot, jobs?: { rows: Record<string, readonly { status: string; owner?: string }[]> }): void;
@@ -122,6 +125,7 @@ interface Harness {
 function harness(): Harness {
   const clock = fakeClock();
   const rings: Reason[] = [];
+  const ringed: { reason: Reason; id: string; title: string }[] = [];
   const watched: string[] = [];
   const released: string[] = [];
   let debounceMs = 1500;
@@ -130,12 +134,15 @@ function harness(): Harness {
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
     readSettings: () => ({ enabled: true, debounceMs }),
-    ring: (reason: Reason) => rings.push(reason),
+    ring: (reason: Reason, session: { id: string; title: string }) => {
+      rings.push(reason);
+      ringed.push({ reason, id: session.id, title: session.title });
+    },
     watch: (id: string) => watched.push(id),
     unwatch: (id: string) => released.push(id),
   });
   return {
-    clock, rings, watched, released,
+    clock, rings, ringed, watched, released,
     update: (sessions, jobs) => watcher.update(sessions, jobs),
     setDebounce: (ms: number) => {
       debounceMs = ms;
@@ -162,12 +169,14 @@ test('an already idle session does not ring on load', () => {
 
 test('a busy session that stops rings once after the quiet period', () => {
   const h = harness();
-  h.update(sessionsOf({ a: { running: true } }));
+  h.update(sessionsOf({ a: { running: true, title: '修复登录' } }));
   assert.deepEqual(h.watched, ['a']);
-  h.update(sessionsOf({ a: { running: false } }));
+  h.update(sessionsOf({ a: { running: false, title: '修复登录' } }));
   assert.equal(h.clock.pending(), 1);
   h.clock.advance(1500);
   assert.deepEqual(h.rings, ['done']);
+  // The banner needs to name the session, so the ring carries its label.
+  assert.deepEqual(h.ringed, [{ reason: 'done', id: 'a', title: '修复登录' }]);
   h.update(sessionsOf({ a: { running: false } }));
   h.clock.advance(10000);
   assert.deepEqual(h.rings, ['done']);
@@ -300,6 +309,8 @@ test('settingsOf falls back to the shipped defaults on junk', () => {
   assert.equal(client.settingsOf({ quietStyle: 'shout' }).quietStyle, 'short');
   assert.equal(client.settingsOf({ dndStart: '25:00' }).dndStart, '');
   assert.equal(client.settingsOf({ restMode: 'yes' }).restMode, false);
+  assert.equal(client.settingsOf({ minRingMs: -1 }).minRingMs, 3000);
+  assert.equal(client.settingsOf({ banner: 'yes' }).banner, true);
 });
 
 test('parseClock reads a 24-hour local time', () => {
@@ -353,6 +364,14 @@ test('effectiveWindowMs applies the master switch and the quiet rules', () => {
   assert.equal(client.effectiveWindowMs(dnd, 500, at(12)), 500);
 });
 
+test('shortest-ring guard: activity cannot cut a ring too early', () => {
+  assert.equal(client.shouldStopOnGesture(undefined, 10_000, 3000), false);
+  assert.equal(client.shouldStopOnGesture(1000, 2500, 3000), false);
+  assert.equal(client.shouldStopOnGesture(1000, 4000, 3000), true);
+  // A zero minimum lets the very next gesture stop it.
+  assert.equal(client.shouldStopOnGesture(1000, 1000, 0), true);
+});
+
 test('the time field accepts an empty string or HH:mm only', () => {
   assert.equal(client.checkTime(''), undefined);
   assert.equal(client.checkTime('07:05'), undefined);
@@ -372,6 +391,6 @@ test('the bundle declares its row and the shipped chime set', () => {
   assert.deepEqual(client.SOUND_IDS, ['chime-soft', 'bell-bright', 'marimba', 'alert-low', 'alert-sharp', 'blip']);
   assert.deepEqual(client.FIELDS, [
     'enabled', 'soundDone', 'soundBlocked', 'volume', 'durationMs', 'debounceMs',
-    'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode',
+    'quietStyle', 'quietShortMs', 'dndStart', 'dndEnd', 'restMode', 'minRingMs', 'banner',
   ]);
 });
