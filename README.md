@@ -33,6 +33,17 @@ dsh profile install https://github.com/LMGateX/dsh-session-chime/releases/downlo
 
 装好后在 **插件 → 会话铃声 → 点组件行 `session-chime`** 打开设置表单。
 
+## DSH 版本兼容
+
+`package.json` 的 `engines.dsh` 声明为 `>=0.1.7-alpha.2 <0.3 || >=0.2.1-alpha.0 <0.3`。注意 npm 的预发布规则：`0.2.1-alpha.x` 这类版本必须由**同一 主.次.补丁 元组**的预发布比较器覆盖，所以第二个分支不能省。
+
+### 0.2.1-alpha.2 起：子代理不再是 job
+
+alpha.2 把子代理运行从「后台作业」改成「activation」：`JobKindMap` 删掉了 `subagent`，`dsh-tool-subagent` 也不再 `jobs.start({ kind: "subagent" })`。对本插件的影响：
+
+- **进程内（本地）子代理**：子会话仍在会话目录里（`parentId` / `origin: "subagent"` / `running`），继续被正确计入。此外现在还会读父行自己的 `subagentCatalog` 投影（宿主从父会话日志算出的直接子代列表），所以即使子行没有 `parentId`、或不在宿主列表 `ids` 里，也仍然算「有子代理在工作」。
+- **外部 provider 的子代理**（例如 alpha.2 里按需安装的 Claude Code / Codex 组合包）：这类运行「没有本地 Session」，也**不再是 job**，客户端的会话目录与 jobs 服务里都看不到它。此时本插件可能出现「子代理还在跑却响铃」的提前提示。这是当前已知限制：客户端没有可用的观测口，关闭它需要宿主半边的观测 + 一条到前端的通道，属于后续工作。
+
 ## 设置页
 
 插件页里的表单分成三组，各用一条品牌色竖线标出组名，控件用主题色（主按钮是实心品牌色、试听按钮是描边品牌色、滑块与开关用 accent 色），卡片背景走 `--dsw-alias-bg-layer-2`，深浅色主题都跟着 DSH 自己的 token：

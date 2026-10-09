@@ -81,10 +81,38 @@ window.__ModuleLoader__.load({
                 }
                 return live;
             }
-            /** Working direct children of one session, from the catalog's own running flags. */
+            /**
+             * Working direct children of one session.
+             *
+             * Two sources, because neither is complete alone: catalog rows carry the
+             * live running flag, and the parent's own `subagentCatalog` projection is
+             * the host-computed child list — authoritative about parentage even for a
+             * child row the client does not attribute (a subagent fallback row may
+             * arrive without `parentId`, and host-list membership is not guaranteed).
+             *
+             * A child that only the projection knows still needs a local row to look
+             * live: an activation owned by an external provider has no local Session
+             * and therefore no running flag here, so it cannot be counted — see the
+             * README note on external subagent providers.
+             */
             function liveChildrenOf(sessionId, sessions) {
+                const parentRow = sessions.byId[sessionId];
+                const catalog = parentRow?.projectionValues?.subagentCatalog;
+                const seen = new Set();
                 let live = 0;
+                if (Array.isArray(catalog)) {
+                    for (const entry of catalog) {
+                        const childId = entry?.id;
+                        if (typeof childId !== 'string' || seen.has(childId))
+                            continue;
+                        seen.add(childId);
+                        if (sessions.byId[childId]?.running === true)
+                            live += 1;
+                    }
+                }
                 for (const childId of sessions.ids) {
+                    if (seen.has(childId))
+                        continue;
                     const child = sessions.byId[childId];
                     if (child === undefined || child.parentId !== sessionId)
                         continue;

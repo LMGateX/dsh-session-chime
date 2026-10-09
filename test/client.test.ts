@@ -97,7 +97,7 @@ function fakeClock() {
 }
 
 /** Build a session catalog snapshot from a compact description. */
-function sessionsOf(rows: Record<string, { running?: boolean; parentId?: string; origin?: string; phase?: string | null; title?: string }>): SessionListSnapshot {
+function sessionsOf(rows: Record<string, { running?: boolean; parentId?: string; origin?: string; phase?: string | null; title?: string; catalog?: readonly string[] }>): SessionListSnapshot {
   const ids = Object.keys(rows);
   const byId: Record<string, Record<string, unknown>> = {};
   for (const id of ids) {
@@ -108,7 +108,13 @@ function sessionsOf(rows: Record<string, { running?: boolean; parentId?: string;
       running: row.running === true,
       ...(row.parentId === undefined ? {} : { parentId: row.parentId }),
       ...(row.origin === undefined ? {} : { origin: row.origin }),
-      ...(row.phase === undefined ? {} : { projectionValues: { goal: row.phase === null ? null : { goal: { phase: row.phase } } } }),
+      ...(row.phase === undefined && row.catalog === undefined ? {} : {
+        projectionValues: {
+          ...(row.phase === undefined ? {} : { goal: row.phase === null ? null : { goal: { phase: row.phase } } }),
+          // The host-computed direct-child list a parent row carries.
+          ...(row.catalog === undefined ? {} : { subagentCatalog: row.catalog.map(id => ({ id, createdAt: 0 })) }),
+        },
+      }),
     };
   }
   return { ids, byId } as SessionListSnapshot;
@@ -169,6 +175,22 @@ test('an already idle session does not ring on load', () => {
   assert.deepEqual(h.rings, []);
 });
 
+test('a running child named only by the parent projection still holds the chime', () => {
+  const h = harness();
+  // The child row carries no parentId (a subagent fallback row may not) and is
+  // absent from the host list, but the parent's own subagentCatalog names it and
+  // its row reports running: the session has not stopped.
+  h.update(sessionsOf({ a: { running: false, catalog: ['child-1'] }, 'child-1': { running: true } }));
+  h.clock.advance(10000);
+  assert.deepEqual(h.rings, []);
+  // Once the child stops, the parent settles normally.
+  h.update(sessionsOf({ a: { running: false, catalog: ['child-1'] }, 'child-1': { running: false } }));
+  h.clock.advance(2000);
+  assert.deepEqual(h.rings, ['done']);
+  h.update(sessionsOf({ a: { running: false, catalog: ['child-1'] }, 'child-1': { running: false } }));
+  h.clock.advance(10000);
+  assert.deepEqual(h.rings, ['done']);
+});
 test('a busy session that stops rings once after the quiet period', () => {
   const h = harness();
   h.update(sessionsOf({ a: { running: true, title: '修复登录' } }));
