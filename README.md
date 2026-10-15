@@ -131,6 +131,15 @@ alpha.2 把子代理运行从「后台作业」改成「activation」：`JobKind
 - 作业名册服务（`ctx.jobs`）是**可选**的，而客户端启动是**一个接一个挂载 API 控制器**：job 控制器的 Remote namespace 排在 session 控制器之后，所以本插件激活时 `ctx.get('jobs')` 几乎必然还是 `undefined`。0.5.4 起改为 `ctx.inject(['jobs'], …)`——服务出现时接入，被替换或移除时释放全部名册订阅；0.5.3 及以前只在激活时读一次，那一次读空就导致整个作业判定在页面生命周期内失效：回合一结束就响，哪怕后台作业还在跑。
 - 作业名单是按会话订阅的，因此插件只为"最近活跃过"的会话开订阅（会话停止 10 分钟后自动释放），一个几百会话的实例不会因此开几百条流。
 
+## 事件与开销
+
+浏览器半边只订阅低频信号：会话目录（宿主帧到达时通知，微任务合并）、可选的作业名册，以及设置表单本身。没有轮询、没有周期性定时器、也不会预解码音频。
+
+- 每个目录帧做一次**线性**判定遍历。父会话的"在工作子代理"计数由**一趟索引**得出（`childIndexOf`：目录里的 `running` 行与各父行 `subagentCatalog` 的交并计数），而不是让每个父会话各扫一遍目录。混入四分之一子代理行与目录投影的实测（p50，单次遍历）：500 行 4.45 → 0.20 ms、1000 行 21.66 → 0.33 ms、2000 行 85.87 → 0.38 ms。
+- 观察值对象就地更新，不再每会话每次遍历新建一个对象，去掉随目录规模增长的分配。
+- 长响铃用 `setTimeout` 串接复播：停止或结束时清定时器、停 source、断开 gain；同一铃声只解码一次并缓存。
+- 需要权衡的一项：会话停止后名册订阅保留 10 分钟（`WATCH_TAIL_MS`）。新回合会立刻重新订阅，所以这段时间主要兜底"名册帧迟到"；调小它（例如 60 秒）能少开闲置流，代价是极端迟到的首帧可能漏看。
+
 ## 开发
 
 ```bash
@@ -156,6 +165,8 @@ A DSH plugin that rings when a session **truly stops**: no running turn, no live
 Chimes, volume, the playback window (up to 6 hours; a short chime repeats until the window is used up, and any click or key press stops it), the quiet-period threshold, a local-time do-not-disturb window (which may cross midnight) and a one-click rest mode are set on the plugin's settings page and apply live; rest mode also has a 🌙/🔔 switch at the sidebar foot. The chimes are CC0 Kenney interface sounds bundled into the browser half, so playback is offline and happens in the browser: closing the page ends the ringing. Browsers need one user gesture before they allow audio, so the first `pointerdown`/`keydown` (or the page's 试听 button) unlocks the context.
 
 Compatible with dsh 0.2.1-alpha.4: that release decides plugin compatibility from `engines.dsh` alone (prereleases participate in the range), and the declared range covers it. The background-job roster is an optional service that the client boot mounts *after* the session controller, so 0.5.4 binds it with `ctx.inject(['jobs'], …)` instead of reading it once at activation — before that fix the chime rang at every turn end even while a background job was still running.
+
+The browser half subscribes only to low-frequency signals (the session catalog, the optional job roster, the settings form): no polling and no periodic timers. Each catalog frame runs one linear pass — the live-children count is built as a single pass index (measured p50 per pass at 500/1000/2000 rows: 4.45/21.66/85.87 ms before, 0.20/0.33/0.38 ms after).
 
 Not published to npm; install from the GitHub Release tarball.
 

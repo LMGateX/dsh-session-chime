@@ -92,7 +92,7 @@ window.__ModuleLoader__.load({
                 return live;
             }
             /**
-             * Working direct children of one session.
+             * Index the running direct children of every parent in one catalog pass.
              *
              * Two sources, because neither is complete alone: catalog rows carry the
              * live running flag, and the parent's own `subagentCatalog` projection is
@@ -100,36 +100,63 @@ window.__ModuleLoader__.load({
              * child row the client does not attribute (a subagent fallback row may
              * arrive without `parentId`, and host-list membership is not guaranteed).
              *
+             * Indexing is what keeps a pass linear. Asking each parent for its own
+             * children walked the whole catalog once per parent, so N sessions cost N²
+             * work per pass — and the catalog notifies on every incoming host frame
+             * (its notifier only batches them into a microtask), which made a
+             * thousand-session instance spend tens of milliseconds per frame on this
+             * alone.
+             *
              * A child that only the projection knows still needs a local row to look
              * live: an activation owned by an external provider has no local Session
              * and therefore no running flag here, so it cannot be counted — see the
              * README note on external subagent providers.
+             *
+             * @param sessions - the catalog snapshot being evaluated.
+             * @returns the three counts that compose one parent's live children.
              */
-            function liveChildrenOf(sessionId, sessions) {
-                const parentRow = sessions.byId[sessionId];
-                const catalog = parentRow?.projectionValues?.subagentCatalog;
-                const seen = new Set();
-                let live = 0;
-                if (Array.isArray(catalog)) {
-                    for (const entry of catalog) {
+            function childIndexOf(sessions) {
+                const parent = new Map();
+                const catalog = new Map();
+                const overlap = new Map();
+                for (const sessionId of sessions.ids) {
+                    const row = sessions.byId[sessionId];
+                    if (row === undefined || row.running !== true || row.parentId === undefined)
+                        continue;
+                    parent.set(row.parentId, (parent.get(row.parentId) ?? 0) + 1);
+                }
+                for (const sessionId of sessions.ids) {
+                    const row = sessions.byId[sessionId];
+                    const entries = row?.projectionValues?.subagentCatalog;
+                    if (!Array.isArray(entries))
+                        continue;
+                    const seen = new Set();
+                    let live = 0;
+                    let both = 0;
+                    for (const entry of entries) {
                         const childId = entry?.id;
                         if (typeof childId !== 'string' || seen.has(childId))
                             continue;
                         seen.add(childId);
-                        if (sessions.byId[childId]?.running === true)
-                            live += 1;
-                    }
-                }
-                for (const childId of sessions.ids) {
-                    if (seen.has(childId))
-                        continue;
-                    const child = sessions.byId[childId];
-                    if (child === undefined || child.parentId !== sessionId)
-                        continue;
-                    if (child.running === true)
+                        const child = sessions.byId[childId];
+                        if (child?.running !== true)
+                            continue;
                         live += 1;
+                        if (child.parentId === sessionId)
+                            both += 1;
+                    }
+                    if (live > 0)
+                        catalog.set(sessionId, live);
+                    if (both > 0)
+                        overlap.set(sessionId, both);
                 }
-                return live;
+                return { catalog, parent, overlap };
+            }
+            /** Working direct children of one session, read from the pass index. */
+            function liveChildrenOf(sessionId, index) {
+                return (index.catalog.get(sessionId) ?? 0)
+                    + (index.parent.get(sessionId) ?? 0)
+                    - (index.overlap.get(sessionId) ?? 0);
             }
             /**
              * Open one session's roster subscription, and report whether one is held now:
@@ -248,6 +275,8 @@ window.__ModuleLoader__.load({
                 lastCatalog = sessions;
                 const now = deps.now();
                 const seen = new Set();
+                // One indexed walk over the catalog replaces a per-parent scan.
+                const children = childIndexOf(sessions);
                 for (const sessionId of sessions.ids) {
                     const row = sessions.byId[sessionId];
                     if (row === undefined)
@@ -270,12 +299,12 @@ window.__ModuleLoader__.load({
                     const running = row.running === true;
                     const phase = phaseOf(row);
                     state.title = titleOf(row);
-                    state.observation = {
-                        running,
-                        liveJobs: liveJobsOf(sessionId),
-                        liveChildren: liveChildrenOf(sessionId, sessions),
-                        goalPhase: phase,
-                    };
+                    // Mutated in place: the object is private to the watcher, and a pass
+                    // runs up to once per animation frame per session.
+                    state.observation.running = running;
+                    state.observation.liveJobs = liveJobsOf(sessionId);
+                    state.observation.liveChildren = liveChildrenOf(sessionId, children);
+                    state.observation.goalPhase = phase;
                     if (running)
                         state.lastBusyAt = now;
                     // The job roster is subscribed only while the session looks alive (or

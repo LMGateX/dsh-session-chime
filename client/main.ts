@@ -158,8 +158,18 @@ window.__ModuleLoader__.load({
         return live
       }
 
+      /** Running direct children per parent, built once per catalog pass. */
+      interface ChildIndex {
+        /** Running children a parent's own `subagentCatalog` attributes to it. */
+        readonly catalog: Map<string, number>
+        /** Running rows that name the parent in `parentId`. */
+        readonly parent: Map<string, number>
+        /** Children both sources see; subtracting them avoids a double count. */
+        readonly overlap: Map<string, number>
+      }
+
       /**
-       * Working direct children of one session.
+       * Index the running direct children of every parent in one catalog pass.
        *
        * Two sources, because neither is complete alone: catalog rows carry the
        * live running flag, and the parent's own `subagentCatalog` projection is
@@ -167,31 +177,57 @@ window.__ModuleLoader__.load({
        * child row the client does not attribute (a subagent fallback row may
        * arrive without `parentId`, and host-list membership is not guaranteed).
        *
+       * Indexing is what keeps a pass linear. Asking each parent for its own
+       * children walked the whole catalog once per parent, so N sessions cost N²
+       * work per pass — and the catalog notifies on every incoming host frame
+       * (its notifier only batches them into a microtask), which made a
+       * thousand-session instance spend tens of milliseconds per frame on this
+       * alone.
+       *
        * A child that only the projection knows still needs a local row to look
        * live: an activation owned by an external provider has no local Session
        * and therefore no running flag here, so it cannot be counted — see the
        * README note on external subagent providers.
+       *
+       * @param sessions - the catalog snapshot being evaluated.
+       * @returns the three counts that compose one parent's live children.
        */
-      function liveChildrenOf(sessionId: string, sessions: SessionListSnapshot): number {
-        const parentRow = sessions.byId[sessionId] as { projectionValues?: { subagentCatalog?: unknown } } | undefined
-        const catalog = parentRow?.projectionValues?.subagentCatalog
-        const seen = new Set<string>()
-        let live = 0
-        if (Array.isArray(catalog)) {
-          for (const entry of catalog) {
+      function childIndexOf(sessions: SessionListSnapshot): ChildIndex {
+        const parent = new Map<string, number>()
+        const catalog = new Map<string, number>()
+        const overlap = new Map<string, number>()
+        for (const sessionId of sessions.ids) {
+          const row = sessions.byId[sessionId]
+          if (row === undefined || row.running !== true || row.parentId === undefined) continue
+          parent.set(row.parentId, (parent.get(row.parentId) ?? 0) + 1)
+        }
+        for (const sessionId of sessions.ids) {
+          const row = sessions.byId[sessionId] as { projectionValues?: { subagentCatalog?: unknown } } | undefined
+          const entries = row?.projectionValues?.subagentCatalog
+          if (!Array.isArray(entries)) continue
+          const seen = new Set<string>()
+          let live = 0
+          let both = 0
+          for (const entry of entries) {
             const childId = (entry as { id?: unknown } | undefined)?.id
             if (typeof childId !== 'string' || seen.has(childId)) continue
             seen.add(childId)
-            if (sessions.byId[childId]?.running === true) live += 1
+            const child = sessions.byId[childId]
+            if (child?.running !== true) continue
+            live += 1
+            if (child.parentId === sessionId) both += 1
           }
+          if (live > 0) catalog.set(sessionId, live)
+          if (both > 0) overlap.set(sessionId, both)
         }
-        for (const childId of sessions.ids) {
-          if (seen.has(childId)) continue
-          const child = sessions.byId[childId]
-          if (child === undefined || child.parentId !== sessionId) continue
-          if (child.running === true) live += 1
-        }
-        return live
+        return { catalog, parent, overlap }
+      }
+
+      /** Working direct children of one session, read from the pass index. */
+      function liveChildrenOf(sessionId: string, index: ChildIndex): number {
+        return (index.catalog.get(sessionId) ?? 0)
+          + (index.parent.get(sessionId) ?? 0)
+          - (index.overlap.get(sessionId) ?? 0)
       }
 
       /**
@@ -305,73 +341,75 @@ window.__ModuleLoader__.load({
         lastCatalog = sessions
         const now = deps.now()
         const seen = new Set<string>()
-          for (const sessionId of sessions.ids) {
-            const row = sessions.byId[sessionId]
-            if (row === undefined) continue
-            // Subagent sessions are part of their parent's quiet period, never a
-            // chime of their own.
-            if (row.parentId !== undefined || row.origin === 'subagent') continue
-            seen.add(sessionId)
-            let state = tracked.get(sessionId)
-            const first = state === undefined
-            if (state === undefined) {
-              state = {
-                running: undefined, phase: null, sawBusy: false, notified: false,
-                lastBusyAt: 0, timer: undefined, watched: false, title: titleOf(row),
-                observation: { running: false, liveJobs: 0, liveChildren: 0, goalPhase: null },
-              }
-              tracked.set(sessionId, state)
+        // One indexed walk over the catalog replaces a per-parent scan.
+        const children = childIndexOf(sessions)
+        for (const sessionId of sessions.ids) {
+          const row = sessions.byId[sessionId]
+          if (row === undefined) continue
+          // Subagent sessions are part of their parent's quiet period, never a
+          // chime of their own.
+          if (row.parentId !== undefined || row.origin === 'subagent') continue
+          seen.add(sessionId)
+          let state = tracked.get(sessionId)
+          const first = state === undefined
+          if (state === undefined) {
+            state = {
+              running: undefined, phase: null, sawBusy: false, notified: false,
+              lastBusyAt: 0, timer: undefined, watched: false, title: titleOf(row),
+              observation: { running: false, liveJobs: 0, liveChildren: 0, goalPhase: null },
             }
-
-            const running = row.running === true
-            const phase = phaseOf(row)
-            state.title = titleOf(row)
-            state.observation = {
-              running,
-              liveJobs: liveJobsOf(sessionId),
-              liveChildren: liveChildrenOf(sessionId, sessions),
-              goalPhase: phase,
-            }
-            if (running) state.lastBusyAt = now
-
-            // The job roster is subscribed only while the session looks alive (or
-            // was a moment ago), so an instance with hundreds of idle sessions opens
-            // no streams at all.
-            const wantsWatch = running || state.observation.liveJobs > 0 || now - state.lastBusyAt < WATCH_TAIL_MS
-            if (wantsWatch && !state.watched) state.watched = watch(sessionId)
-            else if (!wantsWatch && state.watched) {
-              state.watched = false
-              unwatch(sessionId)
-            }
-
-            if (first) {
-              // A page that loads while a session is already idle must not ring for
-              // it: the first observation only seeds the baseline.
-              state.running = running
-              state.phase = phase
-              state.sawBusy = running
-              continue
-            }
-
-            // A blocked goal is a stop in its own right and rings at once.
-            if (phase === 'blocked' && state.phase !== 'blocked' && state.phase !== null) {
-              deps.ring('blocked', { id: sessionId, title: state.title })
-            }
-            state.phase = phase
-
-            if (running) {
-              state.sawBusy = true
-              state.notified = false
-              if (state.timer !== undefined) {
-                deps.clearTimer(state.timer)
-                state.timer = undefined
-              }
-            } else if (state.sawBusy) {
-              schedule(sessionId)
-            }
-            state.running = running
+            tracked.set(sessionId, state)
           }
-          for (const [sessionId, state] of tracked) if (!seen.has(sessionId)) forget(sessionId, state)
+
+          const running = row.running === true
+          const phase = phaseOf(row)
+          state.title = titleOf(row)
+          // Mutated in place: the object is private to the watcher, and a pass
+          // runs up to once per animation frame per session.
+          state.observation.running = running
+          state.observation.liveJobs = liveJobsOf(sessionId)
+          state.observation.liveChildren = liveChildrenOf(sessionId, children)
+          state.observation.goalPhase = phase
+          if (running) state.lastBusyAt = now
+
+          // The job roster is subscribed only while the session looks alive (or
+          // was a moment ago), so an instance with hundreds of idle sessions opens
+          // no streams at all.
+          const wantsWatch = running || state.observation.liveJobs > 0 || now - state.lastBusyAt < WATCH_TAIL_MS
+          if (wantsWatch && !state.watched) state.watched = watch(sessionId)
+          else if (!wantsWatch && state.watched) {
+            state.watched = false
+            unwatch(sessionId)
+          }
+
+          if (first) {
+            // A page that loads while a session is already idle must not ring for
+            // it: the first observation only seeds the baseline.
+            state.running = running
+            state.phase = phase
+            state.sawBusy = running
+            continue
+          }
+
+          // A blocked goal is a stop in its own right and rings at once.
+          if (phase === 'blocked' && state.phase !== 'blocked' && state.phase !== null) {
+            deps.ring('blocked', { id: sessionId, title: state.title })
+          }
+          state.phase = phase
+
+          if (running) {
+            state.sawBusy = true
+            state.notified = false
+            if (state.timer !== undefined) {
+              deps.clearTimer(state.timer)
+              state.timer = undefined
+            }
+          } else if (state.sawBusy) {
+            schedule(sessionId)
+          }
+          state.running = running
+        }
+        for (const [sessionId, state] of tracked) if (!seen.has(sessionId)) forget(sessionId, state)
       }
 
       return { update, attachRoster }

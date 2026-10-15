@@ -313,6 +313,31 @@ test('a working subagent holds the chime', () => {
   h.clock.advance(1500);
   assert.deepEqual(h.rings, ['done']);
 });
+test('the child index attributes live children to the right parent', () => {
+  // child-1 belongs to `a` through both sources; child-2 only through
+  // parentId; child-5 only through `a`'s catalog even though it names `b` as
+  // its parent (the host-computed catalog is authoritative). child-3 runs
+  // under `b` and child-4 under no parent at all: neither may hold `a`.
+  const h = harness();
+  const withChildren = (live: boolean) => sessionsOf({
+    a: { running: false, catalog: ['child-1', 'child-5'] },
+    'child-1': { running: live, parentId: 'a', origin: 'subagent' },
+    'child-2': { running: live, parentId: 'a', origin: 'subagent' },
+    'child-5': { running: live, parentId: 'b', origin: 'subagent' },
+    'child-3': { running: true, parentId: 'b', origin: 'subagent' },
+    'child-4': { running: true, origin: 'subagent' },
+    b: { running: true },
+  });
+  h.update(sessionsOf({ a: { running: true }, b: { running: true } }));
+  h.update(withChildren(true));
+  h.clock.advance(5000);
+  assert.deepEqual(h.rings, [], 'every attributed live child holds the chime exactly once');
+  // Only `a`'s three children stop: the chime must ring for `a` while the
+  // other parent's and the unattributed child keep running.
+  h.update(withChildren(false));
+  h.clock.advance(1500);
+  assert.deepEqual(h.rings, ['done']);
+});
 
 test('subagent sessions never ring on their own', () => {
   const h = harness();
