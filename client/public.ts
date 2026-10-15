@@ -101,7 +101,19 @@ export interface ClientContext {
     register(options: SlotRegistration, component: unknown): unknown
   }
   effect(callback: () => unknown, label: string): unknown
+  /**
+   * Run a nested registration as soon as every named service is available.
+   *
+   * The callback's context carries the services as properties, and cordis runs it
+   * again if a service is replaced. This is the ONLY correct way to read an
+   * optional sibling service: the client boot mounts the API controllers one at a
+   * time, so a service that exists in the finished page may not exist yet when
+   * this bundle activates.
+   */
+  inject(services: readonly string[], register: (scope: ClientContext) => unknown): unknown
   readonly sessions: SessionsService
+  /** Background-job rosters; absent when the deployment mounts no job controller. */
+  readonly jobs?: JobsService
   get?(name: string): unknown
 }
 

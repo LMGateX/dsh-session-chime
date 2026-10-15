@@ -37,6 +37,14 @@ dsh profile install https://github.com/LMGateX/dsh-session-chime/releases/downlo
 
 `package.json` 的 `engines.dsh` 声明为 `>=0.1.7-alpha.2 <0.3 || >=0.2.1-alpha.0 <0.3`。注意 npm 的预发布规则：`0.2.1-alpha.x` 这类版本必须由**同一 主.次.补丁 元组**的预发布比较器覆盖，所以第二个分支不能省。
 
+### 0.2.1-alpha.4 起：`engines.dsh` 单独决定兼容性
+
+alpha.4 的插件管理器把兼容性判定交给 `@deepseek-ai/dsh-app-boot` 的 `evaluatePluginCompatibility`：插件声明了自己的 `engines.dsh` 时**只看这一条**（`peerDependencies` 不再参与），判定用 `semver.satisfies(runtime, range, { includePrerelease: true })`——预发布运行时正常参与区间匹配，npm 那套「同元组预发布比较器」规则在这条路径上不适用（它仍然管 npm 自己的 `engines` 校验，所以第二个分支保留）。
+
+按 alpha.4 的同一规则实测：上面的区间覆盖 `0.2.1-alpha.4`（也覆盖 `0.2.1-alpha.2`、`0.2.2`），并在 `0.3.0-alpha.0` 处停止——alpha.4 与后续 0.2.x 无需改动声明。
+
+alpha.4 对作业与子代理这两条观测路径的改动都是**加法**：`job.list` 名册帧的字段（`owner` / `status` / `rows`）与 alpha.2 相同，只是 job id 由计数改成随机十六进制、作业多了 `toolCall` 元数据，并新增会话事件 `job/registered` / `job/settled`；客户端 `sessions` 服务与 `subagentCatalog` 投影没有形状变化。本插件不解析 job id，也不读会话事件，因此 0.5.4 无需为 alpha.4 改判定逻辑。
+
 ### 0.2.1-alpha.2 起：子代理不再是 job
 
 alpha.2 把子代理运行从「后台作业」改成「activation」：`JobKindMap` 删掉了 `subagent`，`dsh-tool-subagent` 也不再 `jobs.start({ kind: "subagent" })`。对本插件的影响：
@@ -120,6 +128,7 @@ alpha.2 把子代理运行从「后台作业」改成「activation」：`JobKind
 
 - 监听实例里**所有顶层会话**（不只当前打开的那个）。子代理会话不会自己响，它们只计入父会话的"还在工作"。
 - 后台作业按**归属**判断：只有 `owner` 是该会话的 `running`/`stopping` 作业才算它的活；unowned 作业不影响判定。
+- 作业名册服务（`ctx.jobs`）是**可选**的，而客户端启动是**一个接一个挂载 API 控制器**：job 控制器的 Remote namespace 排在 session 控制器之后，所以本插件激活时 `ctx.get('jobs')` 几乎必然还是 `undefined`。0.5.4 起改为 `ctx.inject(['jobs'], …)`——服务出现时接入，被替换或移除时释放全部名册订阅；0.5.3 及以前只在激活时读一次，那一次读空就导致整个作业判定在页面生命周期内失效：回合一结束就响，哪怕后台作业还在跑。
 - 作业名单是按会话订阅的，因此插件只为"最近活跃过"的会话开订阅（会话停止 10 分钟后自动释放），一个几百会话的实例不会因此开几百条流。
 
 ## 开发
@@ -145,6 +154,8 @@ npm run build        # lib/ + client/client.js
 A DSH plugin that rings when a session **truly stops**: no running turn, no live background job owned by that session, and no working subagent. A goal that becomes `blocked` counts as a stop and can use its own chime. All top-level sessions of the instance are watched (subagent sessions never ring on their own).
 
 Chimes, volume, the playback window (up to 6 hours; a short chime repeats until the window is used up, and any click or key press stops it), the quiet-period threshold, a local-time do-not-disturb window (which may cross midnight) and a one-click rest mode are set on the plugin's settings page and apply live; rest mode also has a 🌙/🔔 switch at the sidebar foot. The chimes are CC0 Kenney interface sounds bundled into the browser half, so playback is offline and happens in the browser: closing the page ends the ringing. Browsers need one user gesture before they allow audio, so the first `pointerdown`/`keydown` (or the page's 试听 button) unlocks the context.
+
+Compatible with dsh 0.2.1-alpha.4: that release decides plugin compatibility from `engines.dsh` alone (prereleases participate in the range), and the declared range covers it. The background-job roster is an optional service that the client boot mounts *after* the session controller, so 0.5.4 binds it with `ctx.inject(['jobs'], …)` instead of reading it once at activation — before that fix the chime rang at every turn end even while a background job was still running.
 
 Not published to npm; install from the GitHub Release tarball.
 

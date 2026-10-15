@@ -15,7 +15,10 @@ type Reason = 'done' | 'blocked';
 interface ClientApi {
   apply(ctx: unknown): void;
   isSettled(input: { running: boolean; liveJobs: number; liveChildren: number; goalPhase: string | null }): boolean;
-  createWatcher(deps: Record<string, unknown>): { update(sessions: SessionListSnapshot, jobs: { rows: Record<string, readonly { status: string; owner?: string }[]> } | undefined): void };
+  createWatcher(deps: Record<string, unknown>): {
+    update(sessions: SessionListSnapshot): void;
+    attachRoster(service: unknown): () => void;
+  };
   createEditor(form: ConfigForm): {
     getSnapshot(): { status: string; writable: boolean; values: Record<string, string | boolean>; dirty: boolean; saving: boolean; error: string; conflict: boolean };
     subscribe(fn: () => void): () => void;
@@ -120,13 +123,48 @@ function sessionsOf(rows: Record<string, { running?: boolean; parentId?: string;
   return { ids, byId } as SessionListSnapshot;
 }
 
+/** Controllable stand-in for the optional client job-roster service. */
+function fakeJobs() {
+  const listeners = new Set<() => void>();
+  let rows: Record<string, readonly { status: string; owner?: string }[]> = {};
+  const watched: string[] = [];
+  const released: string[] = [];
+  const service = {
+    state: {
+      getSnapshot: () => ({ rows }),
+      subscribe(listener: () => void) {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+    },
+    watchRows(sessionId: string) {
+      watched.push(sessionId);
+      return () => {
+        released.push(sessionId);
+      };
+    },
+  };
+  return {
+    service, watched, released,
+    /** Publish a complete per-session roster, the way a rows frame does. */
+    set(next: Record<string, readonly { status: string; owner?: string }[]>) {
+      rows = next;
+      for (const listener of [...listeners]) listener();
+    },
+  };
+}
+
 interface Harness {
   clock: ReturnType<typeof fakeClock>;
   rings: Reason[];
   ringed: { reason: Reason; id: string; title: string }[];
-  watched: string[];
-  released: string[];
-  update(sessions: SessionListSnapshot, jobs?: { rows: Record<string, readonly { status: string; owner?: string }[]> }): void;
+  jobs: ReturnType<typeof fakeJobs>;
+  update(sessions: SessionListSnapshot): void;
+  /** Adopt the roster service, as ctx.inject does when the jobs service becomes available. */
+  attach(): void;
+  detach(): void;
   setDebounce(ms: number): void;
 }
 
@@ -134,8 +172,8 @@ function harness(): Harness {
   const clock = fakeClock();
   const rings: Reason[] = [];
   const ringed: { reason: Reason; id: string; title: string }[] = [];
-  const watched: string[] = [];
-  const released: string[] = [];
+  const jobs = fakeJobs();
+  let detach: (() => void) | undefined;
   let debounceMs = 1500;
   const watcher = client.createWatcher({
     now: clock.now,
@@ -146,12 +184,17 @@ function harness(): Harness {
       rings.push(reason);
       ringed.push({ reason, id: session.id, title: session.title });
     },
-    watch: (id: string) => watched.push(id),
-    unwatch: (id: string) => released.push(id),
   });
   return {
-    clock, rings, ringed, watched, released,
-    update: (sessions, jobs) => watcher.update(sessions, jobs),
+    clock, rings, ringed, jobs,
+    update: (sessions) => watcher.update(sessions),
+    attach: () => {
+      detach = watcher.attachRoster(jobs.service);
+    },
+    detach: () => {
+      detach?.();
+      detach = undefined;
+    },
     setDebounce: (ms: number) => {
       debounceMs = ms;
     },
@@ -193,8 +236,9 @@ test('a running child named only by the parent projection still holds the chime'
 });
 test('a busy session that stops rings once after the quiet period', () => {
   const h = harness();
+  h.attach();
   h.update(sessionsOf({ a: { running: true, title: '修复登录' } }));
-  assert.deepEqual(h.watched, ['a']);
+  assert.deepEqual(h.jobs.watched, ['a']);
   h.update(sessionsOf({ a: { running: false, title: '修复登录' } }));
   assert.equal(h.clock.pending(), 1);
   h.clock.advance(1500);
@@ -208,19 +252,53 @@ test('a busy session that stops rings once after the quiet period', () => {
 
 test('waiting on a live job stays silent until the job settles', () => {
   const h = harness();
+  h.attach();
   h.update(sessionsOf({ a: { running: true } }));
-  h.update(sessionsOf({ a: { running: false } }), { rows: { a: [{ status: 'running', owner: 'a' }] } });
+  h.jobs.set({ a: [{ status: 'running', owner: 'a' }] });
+  h.update(sessionsOf({ a: { running: false } }));
   h.clock.advance(5000);
   assert.deepEqual(h.rings, []);
-  h.update(sessionsOf({ a: { running: false } }), { rows: { a: [{ status: 'completed', owner: 'a' }] } });
+  h.jobs.set({ a: [{ status: 'completed', owner: 'a' }] });
   h.clock.advance(1500);
   assert.deepEqual(h.rings, ['done']);
 });
 
 test('an unowned job never counts as this session\'s work', () => {
   const h = harness();
+  h.attach();
   h.update(sessionsOf({ a: { running: true } }));
-  h.update(sessionsOf({ a: { running: false } }), { rows: { a: [{ status: 'running' }] } });
+  h.jobs.set({ a: [{ status: 'running' }] });
+  h.update(sessionsOf({ a: { running: false } }));
+  h.clock.advance(1500);
+  assert.deepEqual(h.rings, ['done']);
+});
+
+test('a roster service that arrives after activation is adopted', () => {
+  // The client boot mounts the API controllers in sequence, so the job half can
+  // activate while the session controller's Remote namespace is still the last
+  // one mounted: the roster service really does arrive after the bundle runs.
+  const h = harness();
+  h.update(sessionsOf({ a: { running: true } }));
+  h.update(sessionsOf({ a: { running: false } }));
+  h.jobs.set({ a: [{ status: 'running', owner: 'a' }] });
+  h.attach();
+  h.clock.advance(5000);
+  assert.deepEqual(h.rings, [], 'the live job must hold the chime once the roster is adopted');
+  assert.deepEqual(h.jobs.watched, ['a']);
+  h.jobs.set({ a: [{ status: 'completed', owner: 'a' }] });
+  h.clock.advance(1500);
+  assert.deepEqual(h.rings, ['done']);
+});
+
+test('losing the roster service releases its subscriptions', () => {
+  const h = harness();
+  h.attach();
+  h.update(sessionsOf({ a: { running: true } }));
+  assert.deepEqual(h.jobs.watched, ['a']);
+  h.detach();
+  assert.deepEqual(h.jobs.released, ['a']);
+  // With the source gone, a later turn end settles on the sessions alone.
+  h.update(sessionsOf({ a: { running: false } }));
   h.clock.advance(1500);
   assert.deepEqual(h.rings, ['done']);
 });
@@ -267,9 +345,98 @@ test('a second quiet stretch rings again after a new turn', () => {
 
 test('a session that leaves the catalog releases its roster watch', () => {
   const h = harness();
+  h.attach();
   h.update(sessionsOf({ a: { running: true } }));
   h.update(sessionsOf({}));
-  assert.deepEqual(h.released, ['a']);
+  assert.deepEqual(h.jobs.released, ['a']);
+});
+
+/**
+ * Drive the real apply() wiring with a fake client context. The job roster is
+ * deliberately NOT available through ctx.get: it is delivered through the
+ * ctx.inject registration once the caller says the controller mounted, which is
+ * exactly the boot order the one-shot ctx.get() read used to lose.
+ */
+function applyHarness() {
+  const value: Record<string, unknown> = { debounceMs: 0 };
+  const form = {
+    getSnapshot: () => ({ status: 'ready', writable: true, revision: 1, value }),
+    subscribe: () => () => {},
+    mutate: async () => true,
+  };
+  const sessionListeners = new Set<() => void>();
+  let sessionSnapshot: SessionListSnapshot = { ids: [], byId: {} };
+  const pendingInjections: ((scope: unknown) => unknown)[] = [];
+  const ctx = {
+    configForms: {
+      get: () => form,
+      whileServed: (_rows: readonly string[], register: () => unknown) => register(),
+    },
+    slots: { inject: () => undefined, register: () => undefined },
+    effect: (callback: () => unknown) => callback(),
+    inject: (_names: readonly string[], register: (scope: unknown) => unknown) => {
+      pendingInjections.push(register);
+      return undefined;
+    },
+    sessions: {
+      list: {
+        getSnapshot: () => sessionSnapshot,
+        subscribe(listener: () => void) {
+          sessionListeners.add(listener);
+          return () => {
+            sessionListeners.delete(listener);
+          };
+        },
+      },
+    },
+    // Models the real boot: the optional service is NOT readable yet.
+    get: () => undefined,
+  };
+  return {
+    ctx,
+    setSessions(next: SessionListSnapshot) {
+      sessionSnapshot = next;
+      for (const listener of [...sessionListeners]) listener();
+    },
+    provideJobs(service: unknown) {
+      for (const register of pendingInjections.splice(0)) register({ jobs: service });
+    },
+  };
+}
+
+test('apply adopts the job roster when the service arrives after activation', () => {
+  // The client boot mounts the API controllers in sequence, so the chime's apply
+  // runs while ctx.get('jobs') is still undefined. The roster must be picked up
+  // through ctx.inject, or the chime rings at every turn end with a live job.
+  let rings = 0;
+  const windowStub = Reflect.get(globalThis, 'window') as object;
+  const previous = Reflect.get(windowStub, 'AudioContext');
+  Reflect.set(windowStub, 'AudioContext', class {
+    state = 'running';
+    resume() {
+      return Promise.resolve();
+    }
+    decodeAudioData() {
+      rings += 1;
+      return Promise.reject(new Error('stub'));
+    }
+  });
+  try {
+    const h = applyHarness();
+    client.apply(h.ctx);
+    const jobs = fakeJobs();
+    h.setSessions(sessionsOf({ a: { running: true } }));
+    assert.deepEqual(jobs.watched, [], 'no roster exists before the service arrives');
+    h.provideJobs(jobs.service);
+    assert.deepEqual(jobs.watched, ['a'], 'the late roster service is adopted and watched');
+    jobs.set({ a: [{ status: 'running', owner: 'a' }] });
+    h.setSessions(sessionsOf({ a: { running: false } }));
+    assert.equal(rings, 0, 'a live background job must hold the chime');
+    jobs.set({ a: [{ status: 'completed', owner: 'a' }] });
+    assert.equal(rings, 1, 'the chime rings once the job settles');
+  } finally {
+    Reflect.set(windowStub, 'AudioContext', previous);
+  }
 });
 
 /** Minimal settings-form stub matching the public service contract. */

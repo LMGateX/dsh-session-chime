@@ -62,14 +62,24 @@ window.__ModuleLoader__.load({
          * Watch every top-level session and decide when one settles.
          *
          * All timers and services are injected so the logic runs under a fake clock in
-         * tests. `watch(sessionId)`/`unwatch(sessionId)` mirror the job-roster
-         * subscription the runtime holds for recently active sessions.
+         * tests. The optional job roster is ATTACHED, never read once: the client boot
+         * mounts the API controllers one after another, so the `jobs` service can
+         * appear well after this bundle activates, and a single `ctx.get('jobs')`
+         * taken at mount time silently loses the whole job half for the page.
          */
         function createWatcher(deps) {
             const tracked = new Map();
+            /** The attached roster source; absent when the deployment mounts no job controller. */
+            let roster;
+            /** Latest snapshot of the attached roster source. */
+            let rosterSnapshot;
+            /** Release handle of the roster subscription held per watched session. */
+            const releases = new Map();
+            /** The last catalog seen, so a roster frame can re-run the same pass. */
+            let lastCatalog = { ids: [], byId: {} };
             /** Live jobs owned by one session (an unowned job is visible to every roster). */
-            function liveJobsOf(sessionId, jobs) {
-                const rows = jobs?.rows?.[sessionId];
+            function liveJobsOf(sessionId) {
+                const rows = rosterSnapshot?.rows?.[sessionId];
                 if (rows === undefined)
                     return 0;
                 let live = 0;
@@ -121,6 +131,70 @@ window.__ModuleLoader__.load({
                 }
                 return live;
             }
+            /**
+             * Open one session's roster subscription, and report whether one is held now:
+             * with no attached source there is no roster to read.
+             */
+            function watch(sessionId) {
+                if (roster === undefined || releases.has(sessionId))
+                    return false;
+                try {
+                    releases.set(sessionId, roster.watchRows(sessionId));
+                    return true;
+                }
+                catch {
+                    // A roster that cannot be opened only costs the job half of the test.
+                    return false;
+                }
+            }
+            /** Release one session's roster subscription, if it holds one. */
+            function unwatch(sessionId) {
+                const release = releases.get(sessionId);
+                if (release === undefined)
+                    return;
+                releases.delete(sessionId);
+                try {
+                    release();
+                }
+                catch {
+                    // The stream is already gone; nothing to release.
+                }
+            }
+            /**
+             * Adopt the roster service and re-evaluate every tracked session against it.
+             *
+             * Bound through `ctx.inject(['jobs'], …)`, so it also runs when the service
+             * arrives long after this bundle activated. The returned handle drops the
+             * subscriptions it opened and restores the sessions-only verdict.
+             *
+             * @param service - the client job roster service.
+             * @returns the detach handle.
+             */
+            function attachRoster(service) {
+                let attached = true;
+                roster = service;
+                rosterSnapshot = service.state.getSnapshot();
+                const stop = service.state.subscribe(() => {
+                    rosterSnapshot = service.state.getSnapshot();
+                    update(lastCatalog);
+                });
+                update(lastCatalog);
+                return () => {
+                    if (!attached)
+                        return;
+                    attached = false;
+                    stop();
+                    roster = undefined;
+                    rosterSnapshot = undefined;
+                    for (const [sessionId, state] of tracked) {
+                        if (!state.watched)
+                            continue;
+                        state.watched = false;
+                        unwatch(sessionId);
+                    }
+                    update(lastCatalog);
+                };
+            }
             /** The catalog's human-facing label for one row. */
             function titleOf(row) {
                 const source = row;
@@ -166,86 +240,85 @@ window.__ModuleLoader__.load({
                 if (state.timer !== undefined)
                     deps.clearTimer(state.timer);
                 if (state.watched)
-                    deps.unwatch(sessionId);
+                    unwatch(sessionId);
                 tracked.delete(sessionId);
             }
-            return {
-                update(sessions, jobs) {
-                    const now = deps.now();
-                    const seen = new Set();
-                    for (const sessionId of sessions.ids) {
-                        const row = sessions.byId[sessionId];
-                        if (row === undefined)
-                            continue;
-                        // Subagent sessions are part of their parent's quiet period, never a
-                        // chime of their own.
-                        if (row.parentId !== undefined || row.origin === 'subagent')
-                            continue;
-                        seen.add(sessionId);
-                        let state = tracked.get(sessionId);
-                        const first = state === undefined;
-                        if (state === undefined) {
-                            state = {
-                                running: undefined, phase: null, sawBusy: false, notified: false,
-                                lastBusyAt: 0, timer: undefined, watched: false, title: titleOf(row),
-                                observation: { running: false, liveJobs: 0, liveChildren: 0, goalPhase: null },
-                            };
-                            tracked.set(sessionId, state);
-                        }
-                        const running = row.running === true;
-                        const phase = phaseOf(row);
-                        state.title = titleOf(row);
-                        state.observation = {
-                            running,
-                            liveJobs: liveJobsOf(sessionId, jobs),
-                            liveChildren: liveChildrenOf(sessionId, sessions),
-                            goalPhase: phase,
+            /** Run the settle pass for a catalog snapshot under the attached roster. */
+            function update(sessions) {
+                lastCatalog = sessions;
+                const now = deps.now();
+                const seen = new Set();
+                for (const sessionId of sessions.ids) {
+                    const row = sessions.byId[sessionId];
+                    if (row === undefined)
+                        continue;
+                    // Subagent sessions are part of their parent's quiet period, never a
+                    // chime of their own.
+                    if (row.parentId !== undefined || row.origin === 'subagent')
+                        continue;
+                    seen.add(sessionId);
+                    let state = tracked.get(sessionId);
+                    const first = state === undefined;
+                    if (state === undefined) {
+                        state = {
+                            running: undefined, phase: null, sawBusy: false, notified: false,
+                            lastBusyAt: 0, timer: undefined, watched: false, title: titleOf(row),
+                            observation: { running: false, liveJobs: 0, liveChildren: 0, goalPhase: null },
                         };
-                        if (running)
-                            state.lastBusyAt = now;
-                        // The job roster is subscribed only while the session looks alive (or
-                        // was a moment ago), so an instance with hundreds of idle sessions opens
-                        // no streams at all.
-                        const wantsWatch = running || state.observation.liveJobs > 0 || now - state.lastBusyAt < WATCH_TAIL_MS;
-                        if (wantsWatch && !state.watched) {
-                            state.watched = true;
-                            deps.watch(sessionId);
-                        }
-                        else if (!wantsWatch && state.watched) {
-                            state.watched = false;
-                            deps.unwatch(sessionId);
-                        }
-                        if (first) {
-                            // A page that loads while a session is already idle must not ring for
-                            // it: the first observation only seeds the baseline.
-                            state.running = running;
-                            state.phase = phase;
-                            state.sawBusy = running;
-                            continue;
-                        }
-                        // A blocked goal is a stop in its own right and rings at once.
-                        if (phase === 'blocked' && state.phase !== 'blocked' && state.phase !== null) {
-                            deps.ring('blocked', { id: sessionId, title: state.title });
-                        }
-                        state.phase = phase;
-                        if (running) {
-                            state.sawBusy = true;
-                            state.notified = false;
-                            if (state.timer !== undefined) {
-                                deps.clearTimer(state.timer);
-                                state.timer = undefined;
-                            }
-                        }
-                        else if (state.sawBusy) {
-                            schedule(sessionId);
-                        }
-                        state.running = running;
+                        tracked.set(sessionId, state);
                     }
-                    for (const [sessionId, state] of tracked)
-                        if (!seen.has(sessionId))
-                            forget(sessionId, state);
-                },
-            };
+                    const running = row.running === true;
+                    const phase = phaseOf(row);
+                    state.title = titleOf(row);
+                    state.observation = {
+                        running,
+                        liveJobs: liveJobsOf(sessionId),
+                        liveChildren: liveChildrenOf(sessionId, sessions),
+                        goalPhase: phase,
+                    };
+                    if (running)
+                        state.lastBusyAt = now;
+                    // The job roster is subscribed only while the session looks alive (or
+                    // was a moment ago), so an instance with hundreds of idle sessions opens
+                    // no streams at all.
+                    const wantsWatch = running || state.observation.liveJobs > 0 || now - state.lastBusyAt < WATCH_TAIL_MS;
+                    if (wantsWatch && !state.watched)
+                        state.watched = watch(sessionId);
+                    else if (!wantsWatch && state.watched) {
+                        state.watched = false;
+                        unwatch(sessionId);
+                    }
+                    if (first) {
+                        // A page that loads while a session is already idle must not ring for
+                        // it: the first observation only seeds the baseline.
+                        state.running = running;
+                        state.phase = phase;
+                        state.sawBusy = running;
+                        continue;
+                    }
+                    // A blocked goal is a stop in its own right and rings at once.
+                    if (phase === 'blocked' && state.phase !== 'blocked' && state.phase !== null) {
+                        deps.ring('blocked', { id: sessionId, title: state.title });
+                    }
+                    state.phase = phase;
+                    if (running) {
+                        state.sawBusy = true;
+                        state.notified = false;
+                        if (state.timer !== undefined) {
+                            deps.clearTimer(state.timer);
+                            state.timer = undefined;
+                        }
+                    }
+                    else if (state.sawBusy) {
+                        schedule(sessionId);
+                    }
+                    state.running = running;
+                }
+                for (const [sessionId, state] of tracked)
+                    if (!seen.has(sessionId))
+                        forget(sessionId, state);
+            }
+            return { update, attachRoster };
         }
         /** A tiny observable boolean, so one switch can subscribe to a slice of the form. */
         function createFlag(initial) {
@@ -1055,7 +1128,8 @@ window.__ModuleLoader__.load({
          * `{ required: [...], optional: [...] }` became two services literally named
          * `required` and `optional`: the fiber waited forever and the Web boot audit
          * reported "1 entry did not activate" for the whole page. An unscoped service
-         * is optional by nature — `jobs` is read through `ctx.get` below.
+         * is optional by nature — the optional job roster is bound separately through
+         * `ctx.inject(['jobs'], …)` in `apply` below.
          */
         const inject = ['slots', 'configForms', 'sessions'];
         /**
@@ -1072,8 +1146,6 @@ window.__ModuleLoader__.load({
                 latest = settingsOf(form.getSnapshot().value);
                 restFlag.set(latest.restMode);
             });
-            const jobs = typeof ctx.get === 'function' ? ctx.get('jobs') : undefined;
-            const releases = new Map();
             const banner = createBanner();
             /** The ring currently playing, if any; the banner and the min-ring guard read it. */
             let activeRing;
@@ -1125,51 +1197,27 @@ window.__ModuleLoader__.load({
                 ring(reason, session) {
                     playRing(reason, session, reason === 'blocked' ? latest.soundBlocked : latest.soundDone);
                 },
-                watch(sessionId) {
-                    if (jobs === undefined || releases.has(sessionId))
-                        return;
-                    try {
-                        releases.set(sessionId, jobs.watchRows(sessionId));
-                    }
-                    catch {
-                        // A roster that cannot be opened only costs the job half of the test.
-                    }
-                },
-                unwatch(sessionId) {
-                    const release = releases.get(sessionId);
-                    if (release === undefined)
-                        return;
-                    releases.delete(sessionId);
-                    try {
-                        release();
-                    }
-                    catch {
-                        // The stream is already gone; nothing to release.
-                    }
-                },
             });
             ctx.effect(() => {
                 const list = ctx.sessions.list;
-                const jobsState = jobs?.state;
-                const pump = () => watcher.update(list.getSnapshot(), jobsState?.getSnapshot());
+                const pump = () => watcher.update(list.getSnapshot());
                 pump();
-                const stopSessions = list.subscribe(pump);
-                const stopJobs = jobsState?.subscribe(pump);
-                return () => {
-                    stopSessions();
-                    stopJobs?.();
-                    for (const sessionId of [...releases.keys()]) {
-                        const release = releases.get(sessionId);
-                        releases.delete(sessionId);
-                        try {
-                            release?.();
-                        }
-                        catch {
-                            // Nothing left to release.
-                        }
-                    }
-                };
+                return list.subscribe(pump);
             }, 'dsh-session-chime: session watcher');
+            // The job roster is an optional sibling service, and the client boot mounts
+            // the API controllers in sequence: the job controller's Remote namespace is
+            // mounted after the session controller's, so `jobs` reliably appears AFTER
+            // this bundle activates. A single `ctx.get('jobs')` read at mount time
+            // therefore returns undefined and the whole job half stays dead for the
+            // page's life — the chime then rings at every turn end even while a
+            // background job is running. ctx.inject binds the roster whenever the
+            // service arrives, and the detach it returns drops the subscriptions again.
+            ctx.inject(['jobs'], (scope) => {
+                const roster = scope.jobs;
+                if (roster === undefined)
+                    return undefined;
+                return watcher.attachRoster(roster);
+            });
             // Browsers keep audio suspended until the user interacts. Past the shortest-ring
             // guard, a gesture also stops a ringing chime: a long window is a legitimate
             // setting, but a click or key press means the human is back and has heard it.

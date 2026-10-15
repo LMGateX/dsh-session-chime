@@ -40,6 +40,8 @@ window.__ModuleLoader__.load({
     type ChimeReason = import('./public.js').ChimeReason
     type ChimeSettings = import('./public.js').ChimeSettings
     type JobRow = import('./public.js').JobRow
+    type JobsService = import('./public.js').JobsService
+    type JobsSnapshot = import('./public.js').JobsSnapshot
     type PathOperation = import('./public.js').PathOperation
     type ReactRuntime = import('./public.js').ReactRuntime
     type RingInfo = import('./public.js').RingInfo
@@ -92,8 +94,10 @@ window.__ModuleLoader__.load({
      * Watch every top-level session and decide when one settles.
      *
      * All timers and services are injected so the logic runs under a fake clock in
-     * tests. `watch(sessionId)`/`unwatch(sessionId)` mirror the job-roster
-     * subscription the runtime holds for recently active sessions.
+     * tests. The optional job roster is ATTACHED, never read once: the client boot
+     * mounts the API controllers one after another, so the `jobs` service can
+     * appear well after this bundle activates, and a single `ctx.get('jobs')`
+     * taken at mount time silently loses the whole job half for the page.
      */
     function createWatcher(deps: {
       now(): number
@@ -101,9 +105,12 @@ window.__ModuleLoader__.load({
       clearTimer(handle: unknown): void
       readSettings(): ChimeSettings
       ring(reason: ChimeReason, session: { id: string; title: string }): void
-      watch(sessionId: string): void
-      unwatch(sessionId: string): void
-    }): { update(sessions: SessionListSnapshot, jobs: { readonly rows: Readonly<Record<string, readonly JobRow[]>> } | undefined): void } {
+    }): {
+      /** Re-run the settle pass over one session-catalog snapshot. */
+      update(sessions: SessionListSnapshot): void
+      /** Adopt the optional roster service; the returned handle gives it up again. */
+      attachRoster(service: JobsService): () => void
+    } {
       interface Tracked {
         /** Last observed running state (undefined until the first observation). */
         running: boolean | undefined
@@ -127,9 +134,21 @@ window.__ModuleLoader__.load({
 
       const tracked = new Map<string, Tracked>()
 
+      /** The attached roster source; absent when the deployment mounts no job controller. */
+      let roster: JobsService | undefined
+
+      /** Latest snapshot of the attached roster source. */
+      let rosterSnapshot: JobsSnapshot | undefined
+
+      /** Release handle of the roster subscription held per watched session. */
+      const releases = new Map<string, () => void>()
+
+      /** The last catalog seen, so a roster frame can re-run the same pass. */
+      let lastCatalog: SessionListSnapshot = { ids: [], byId: {} }
+
       /** Live jobs owned by one session (an unowned job is visible to every roster). */
-      function liveJobsOf(sessionId: string, jobs: { readonly rows: Readonly<Record<string, readonly JobRow[]>> } | undefined): number {
-        const rows = jobs?.rows?.[sessionId]
+      function liveJobsOf(sessionId: string): number {
+        const rows = rosterSnapshot?.rows?.[sessionId]
         if (rows === undefined) return 0
         let live = 0
         for (const job of rows) {
@@ -175,6 +194,67 @@ window.__ModuleLoader__.load({
         return live
       }
 
+      /**
+       * Open one session's roster subscription, and report whether one is held now:
+       * with no attached source there is no roster to read.
+       */
+      function watch(sessionId: string): boolean {
+        if (roster === undefined || releases.has(sessionId)) return false
+        try {
+          releases.set(sessionId, roster.watchRows(sessionId))
+          return true
+        } catch {
+          // A roster that cannot be opened only costs the job half of the test.
+          return false
+        }
+      }
+
+      /** Release one session's roster subscription, if it holds one. */
+      function unwatch(sessionId: string): void {
+        const release = releases.get(sessionId)
+        if (release === undefined) return
+        releases.delete(sessionId)
+        try {
+          release()
+        } catch {
+          // The stream is already gone; nothing to release.
+        }
+      }
+
+      /**
+       * Adopt the roster service and re-evaluate every tracked session against it.
+       *
+       * Bound through `ctx.inject(['jobs'], …)`, so it also runs when the service
+       * arrives long after this bundle activated. The returned handle drops the
+       * subscriptions it opened and restores the sessions-only verdict.
+       *
+       * @param service - the client job roster service.
+       * @returns the detach handle.
+       */
+      function attachRoster(service: JobsService): () => void {
+        let attached = true
+        roster = service
+        rosterSnapshot = service.state.getSnapshot()
+        const stop = service.state.subscribe(() => {
+          rosterSnapshot = service.state.getSnapshot()
+          update(lastCatalog)
+        })
+        update(lastCatalog)
+        return () => {
+          if (!attached) return
+          attached = false
+          stop()
+          roster = undefined
+          rosterSnapshot = undefined
+          for (const [sessionId, state] of tracked) {
+            if (!state.watched) continue
+            state.watched = false
+            unwatch(sessionId)
+          }
+          update(lastCatalog)
+        }
+      }
+
       /** The catalog's human-facing label for one row. */
       function titleOf(row: unknown): string {
         const source = row as { displayTitle?: unknown; title?: unknown; id?: unknown } | undefined
@@ -216,14 +296,15 @@ window.__ModuleLoader__.load({
       /** Drop every trace of a session that left the catalog. */
       function forget(sessionId: string, state: Tracked): void {
         if (state.timer !== undefined) deps.clearTimer(state.timer)
-        if (state.watched) deps.unwatch(sessionId)
+        if (state.watched) unwatch(sessionId)
         tracked.delete(sessionId)
       }
 
-      return {
-        update(sessions, jobs) {
-          const now = deps.now()
-          const seen = new Set<string>()
+      /** Run the settle pass for a catalog snapshot under the attached roster. */
+      function update(sessions: SessionListSnapshot): void {
+        lastCatalog = sessions
+        const now = deps.now()
+        const seen = new Set<string>()
           for (const sessionId of sessions.ids) {
             const row = sessions.byId[sessionId]
             if (row === undefined) continue
@@ -247,7 +328,7 @@ window.__ModuleLoader__.load({
             state.title = titleOf(row)
             state.observation = {
               running,
-              liveJobs: liveJobsOf(sessionId, jobs),
+              liveJobs: liveJobsOf(sessionId),
               liveChildren: liveChildrenOf(sessionId, sessions),
               goalPhase: phase,
             }
@@ -257,12 +338,10 @@ window.__ModuleLoader__.load({
             // was a moment ago), so an instance with hundreds of idle sessions opens
             // no streams at all.
             const wantsWatch = running || state.observation.liveJobs > 0 || now - state.lastBusyAt < WATCH_TAIL_MS
-            if (wantsWatch && !state.watched) {
-              state.watched = true
-              deps.watch(sessionId)
-            } else if (!wantsWatch && state.watched) {
+            if (wantsWatch && !state.watched) state.watched = watch(sessionId)
+            else if (!wantsWatch && state.watched) {
               state.watched = false
-              deps.unwatch(sessionId)
+              unwatch(sessionId)
             }
 
             if (first) {
@@ -293,8 +372,9 @@ window.__ModuleLoader__.load({
             state.running = running
           }
           for (const [sessionId, state] of tracked) if (!seen.has(sessionId)) forget(sessionId, state)
-        },
       }
+
+      return { update, attachRoster }
     }
 
     /** A tiny observable boolean, so one switch can subscribe to a slice of the form. */
@@ -1167,7 +1247,8 @@ window.__ModuleLoader__.load({
      * `{ required: [...], optional: [...] }` became two services literally named
      * `required` and `optional`: the fiber waited forever and the Web boot audit
      * reported "1 entry did not activate" for the whole page. An unscoped service
-     * is optional by nature — `jobs` is read through `ctx.get` below.
+     * is optional by nature — the optional job roster is bound separately through
+     * `ctx.inject(['jobs'], …)` in `apply` below.
      */
     const inject = ['slots', 'configForms', 'sessions']
 
@@ -1186,8 +1267,6 @@ window.__ModuleLoader__.load({
         restFlag.set(latest.restMode)
       })
 
-      const jobs = typeof ctx.get === 'function' ? (ctx.get('jobs') as import('./public.js').JobsService | undefined) : undefined
-      const releases = new Map<string, () => void>()
       const banner = createBanner()
       /** The ring currently playing, if any; the banner and the min-ring guard read it. */
       let activeRing: RingInfo | undefined
@@ -1239,47 +1318,28 @@ window.__ModuleLoader__.load({
         ring(reason, session) {
           playRing(reason, session, reason === 'blocked' ? latest.soundBlocked : latest.soundDone)
         },
-        watch(sessionId) {
-          if (jobs === undefined || releases.has(sessionId)) return
-          try {
-            releases.set(sessionId, jobs.watchRows(sessionId))
-          } catch {
-            // A roster that cannot be opened only costs the job half of the test.
-          }
-        },
-        unwatch(sessionId) {
-          const release = releases.get(sessionId)
-          if (release === undefined) return
-          releases.delete(sessionId)
-          try {
-            release()
-          } catch {
-            // The stream is already gone; nothing to release.
-          }
-        },
       })
 
       ctx.effect(() => {
         const list = ctx.sessions.list
-        const jobsState = jobs?.state
-        const pump = (): void => watcher.update(list.getSnapshot(), jobsState?.getSnapshot())
+        const pump = (): void => watcher.update(list.getSnapshot())
         pump()
-        const stopSessions = list.subscribe(pump)
-        const stopJobs = jobsState?.subscribe(pump)
-        return () => {
-          stopSessions()
-          stopJobs?.()
-          for (const sessionId of [...releases.keys()]) {
-            const release = releases.get(sessionId)
-            releases.delete(sessionId)
-            try {
-              release?.()
-            } catch {
-              // Nothing left to release.
-            }
-          }
-        }
+        return list.subscribe(pump)
       }, 'dsh-session-chime: session watcher')
+
+      // The job roster is an optional sibling service, and the client boot mounts
+      // the API controllers in sequence: the job controller's Remote namespace is
+      // mounted after the session controller's, so `jobs` reliably appears AFTER
+      // this bundle activates. A single `ctx.get('jobs')` read at mount time
+      // therefore returns undefined and the whole job half stays dead for the
+      // page's life — the chime then rings at every turn end even while a
+      // background job is running. ctx.inject binds the roster whenever the
+      // service arrives, and the detach it returns drops the subscriptions again.
+      ctx.inject(['jobs'], (scope) => {
+        const roster = scope.jobs
+        if (roster === undefined) return undefined
+        return watcher.attachRoster(roster)
+      })
 
       // Browsers keep audio suspended until the user interacts. Past the shortest-ring
       // guard, a gesture also stops a ringing chime: a long window is a legitimate
