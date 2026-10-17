@@ -28,7 +28,7 @@
 
 ```bash
 # 在 web profile 里（profile 名按你的启动方式替换）
-dsh plugin --profile web add https://github.com/LMGateX/dsh-session-chime/releases/download/v0.5.6/dsh-session-chime-0.5.6.tgz
+dsh plugin --profile web add https://github.com/LMGateX/dsh-session-chime/releases/download/v0.5.7/dsh-session-chime-0.5.7.tgz
 ```
 
 装好后在 **插件 → 会话铃声 → 点 `dsh-session-chime` 这一行** 打开设置表单。
