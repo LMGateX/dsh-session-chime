@@ -41,11 +41,11 @@ dsh profile install https://github.com/LMGateX/dsh-session-chime/releases/downlo
 
 alpha.4 的插件管理器把兼容性判定交给 `@deepseek-ai/dsh-app-boot` 的 `evaluatePluginCompatibility`：插件声明了自己的 `engines.dsh` 时**只看这一条**（`peerDependencies` 不再参与），判定用 `semver.satisfies(runtime, range, { includePrerelease: true })`——预发布运行时正常参与区间匹配，npm 那套「同元组预发布比较器」规则在这条路径上不适用（它仍然管 npm 自己的 `engines` 校验，所以第二个分支保留）。
 
-按 alpha.4 的同一规则实测：上面的区间覆盖 `0.2.1-alpha.4`（也覆盖 `0.2.1-alpha.2`、`0.2.1-alpha.5`、`0.2.1-rc.1`、`0.2.2`），并在 `0.3.0-alpha.0` 处停止——alpha.4 与后续 0.2.x 无需改动声明。
+按 alpha.4 的同一规则实测：上面的区间覆盖 `0.2.1-alpha.4`（也覆盖 `0.2.1-alpha.2`、`0.2.1-alpha.5`、`0.2.1-rc.1`、`0.2.1-rc.2`、`0.2.2`），并在 `0.3.0-alpha.0` 处停止——alpha.4 与后续 0.2.x 无需改动声明。
 
 alpha.4 对作业与子代理这两条观测路径的改动都是**加法**：`job.list` 名册帧的字段（`owner` / `status` / `rows`）与 alpha.2 相同，只是 job id 由计数改成随机十六进制、作业多了 `toolCall` 元数据，并新增会话事件 `job/registered` / `job/settled`；客户端 `sessions` 服务与 `subagentCatalog` 投影没有形状变化。本插件不解析 job id，也不读会话事件，因此 0.5.4 无需为 alpha.4 改判定逻辑。
 
-### 0.2.1-rc.1
+### 0.2.1-rc.1 / rc.2
 
 rc.1 仍由 `evaluatePluginCompatibility` 按 `engines.dsh` 判定兼容性；用 rc.1 的同一实现实测 `0.2.1-rc.1` → **兼容**（`0.2.1-alpha.5`、`0.2.2` 也在区间内）。
 
@@ -57,6 +57,8 @@ rc.1 对本插件依赖的公开契约没有破坏性改动：
 - `window.__ModuleLoader__.load({ id, factory })` 经典脚本注册、`dsh.client` / `dsh.bundle.patch` 声明、`locale/*.json` 元信息解析也未变；`jobs` 服务仍由 `dsh-api-remotes` 在 `sessions` 之后逐个挂载，所以 0.5.4 的 `ctx.inject(['jobs'], …)` 仍是正确做法。
 
 rc.1 还修复了“后台工作流仍在运行却因父级回合结束被标为已中断”，这正是本插件“等后台作业真正结束再响”的前提；修复后作业在工作期间继续留在名册里，本插件不改判定即可受益。rc.1 新增的会话状态记录接口、`activity` / `usage` 扩展位拆分与 `invariant` 导出移除都与本插件无关。
+
+rc.2 是一次聚焦模型与搜索的小版本：新增 DeepSeek-V4.1-Flash-1017 的模型标签插件和 DeepSeek Search / Fetch 支持，改动集中在 `ui-deepseek-model-label-1017`、`ui-settings-web-search`、`web-deepseek-api`、`web-search-deepseek` 与两处组合 patch。本插件依赖的包（session / job controller、remotes、client modules、ui-settings / renderer / slots、locale、app-boot、plugin-manager、goal、subagent、ui-plugin-manager）在 rc.1 → rc.2 之间只有 `package.json` 版本号变化；`evaluatePluginCompatibility` 的代码逐字节相同，用 rc.2 的 app-boot 实测 `0.2.1-rc.2` → **兼容**。新增的模型标签占 `conversation.input.model.label`，与本插件用到的三个槽位不冲突。
 
 ### 0.2.1-alpha.2 起：子代理不再是 job
 
@@ -177,7 +179,7 @@ A DSH plugin that rings when a session **truly stops**: no running turn, no live
 
 Chimes, volume, the playback window (up to 6 hours; a short chime repeats until the window is used up, and any click or key press stops it), the quiet-period threshold, a local-time do-not-disturb window (which may cross midnight) and a one-click rest mode are set on the plugin's settings page and apply live; rest mode also has a 🌙/🔔 switch at the sidebar foot. The chimes are CC0 Kenney interface sounds bundled into the browser half, so playback is offline and happens in the browser: closing the page ends the ringing. Browsers need one user gesture before they allow audio, so the first `pointerdown`/`keydown` (or the page's 试听 button) unlocks the context.
 
-Compatible with dsh 0.2.1-alpha.4 and 0.2.1-rc.1: those releases decide plugin compatibility from `engines.dsh` alone (prereleases participate in the range), and the declared range covers them. Re-checked against the 0.2.1-rc.1 sources: the session catalog, job roster, goal/subagent projections, config forms, slots, locale service and classic-script module loader are unchanged. The background-job roster is an optional service that the client boot mounts *after* the session controller, so 0.5.4 binds it with `ctx.inject(['jobs'], …)` instead of reading it once at activation — before that fix the chime rang at every turn end even while a background job was still running.
+Compatible with dsh 0.2.1-alpha.4, 0.2.1-rc.1 and 0.2.1-rc.2: those releases decide plugin compatibility from `engines.dsh` alone (prereleases participate in the range), and the declared range covers them. Re-checked against the 0.2.1-rc.1 sources: the session catalog, job roster, goal/subagent projections, config forms, slots, locale service and classic-script module loader are unchanged. rc.2 changes only package versions on every surface this plugin uses (its compatibility evaluator is byte-identical) and adds unrelated web-search and model-label features. The background-job roster is an optional service that the client boot mounts *after* the session controller, so 0.5.4 binds it with `ctx.inject(['jobs'], …)` instead of reading it once at activation — before that fix the chime rang at every turn end even while a background job was still running.
 
 The browser half subscribes only to low-frequency signals (the session catalog, the optional job roster, the settings form): no polling and no periodic timers. Each catalog frame runs one linear pass — the live-children count is built as a single pass index (measured p50 per pass at 500/1000/2000 rows: 4.45/21.66/85.87 ms before, 0.20/0.33/0.38 ms after).
 
