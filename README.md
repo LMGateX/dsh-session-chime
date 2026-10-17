@@ -148,12 +148,15 @@ alpha.2 把子代理运行从「后台作业」改成「activation」：`JobKind
 
 ## 事件与开销
 
-浏览器半边只订阅低频信号：会话目录（宿主帧到达时通知，微任务合并）、可选的作业名册，以及设置表单本身。没有轮询、没有周期性定时器、也不会预解码音频。
+浏览器半边只订阅事件源：会话目录、可选的作业名册、设置表单与语言切换。没有轮询、没有周期性定时器，音频只在第一次播放时解码。需要说明的是"低频"只对名册和设置成立：会话目录的通知跟每个提交事件走——宿主把每个注册投影的变化都推给客户端（`subagentTiming` 在回合进行时每个事件都会变），客户端再在微任务里合并后通知。因此关键在于每次遍历足够便宜：
 
-- 每个目录帧做一次**线性**判定遍历。父会话的"在工作子代理"计数由**一趟索引**得出（`childIndexOf`：目录里的 `running` 行与各父行 `subagentCatalog` 的交并计数），而不是让每个父会话各扫一遍目录。混入四分之一子代理行与目录投影的实测（p50，单次遍历）：500 行 4.45 → 0.20 ms、1000 行 21.66 → 0.33 ms、2000 行 85.87 → 0.38 ms。
+- 每个目录帧做一次**线性**判定遍历，但**不**构建子代理索引：索引只在某个会话的安静判定真正到期时按需构建，并按目录快照缓存（同一快照里一批会话结算只建一次）。父会话的"在工作子代理"计数仍由 `childIndexOf` 一趟算出（目录 `running` 行 × 各父行 `subagentCatalog` 的交并），只是从"每帧"挪到了"每次判定"。混入四分之一子代理行与目录投影的实测（p50，150 次；同一基准，改动前 → 改动后）：500/1000/2000 行遍历 0.12/0.21/0.45 → 0.05/0.11/0.26 ms；按需建索引 0.08/0.14/0.30 ms（每次判定一次；同一快照 100 次判定合计约 0.2/0.2/0.33 ms）。
 - 观察值对象就地更新，不再每会话每次遍历新建一个对象，去掉随目录规模增长的分配。
+- 作业名册的快照在每次作业输出观测时也会重建 `rows` 对象，但各会话的行**数组**引用只在名册真正变化时替换；watcher 比较行数组，输出帧不触发目录遍历。
+- 设置表单订阅用 `ctx.effect` 绑定在插件 fiber 上：热重载/卸载会释放监听，旧实例不会继续持有音频上下文。
 - 长响铃用 `setTimeout` 串接复播：停止或结束时清定时器、停 source、断开 gain；同一铃声只解码一次并缓存。
 - 需要权衡的一项：会话停止后名册订阅保留 10 分钟（`WATCH_TAIL_MS`）。新回合会立刻重新订阅，所以这段时间主要兜底"名册帧迟到"；调小它（例如 60 秒）能少开闲置流，代价是极端迟到的首帧可能漏看。
+- 可复现实测：`npm run build && node scripts/bench-watcher.mjs`；改动前的数字可用 0.5.5 的 tarball 跑同一脚本复现。
 
 ## 开发
 
@@ -181,7 +184,7 @@ Chimes, volume, the playback window (up to 6 hours; a short chime repeats until 
 
 Compatible with dsh 0.2.1-alpha.4, 0.2.1-rc.1 and 0.2.1-rc.2: those releases decide plugin compatibility from `engines.dsh` alone (prereleases participate in the range), and the declared range covers them. Re-checked against the 0.2.1-rc.1 sources: the session catalog, job roster, goal/subagent projections, config forms, slots, locale service and classic-script module loader are unchanged. rc.2 changes only package versions on every surface this plugin uses (its compatibility evaluator is byte-identical) and adds unrelated web-search and model-label features. The background-job roster is an optional service that the client boot mounts *after* the session controller, so 0.5.4 binds it with `ctx.inject(['jobs'], …)` instead of reading it once at activation — before that fix the chime rang at every turn end even while a background job was still running.
 
-The browser half subscribes only to low-frequency signals (the session catalog, the optional job roster, the settings form): no polling and no periodic timers. Each catalog frame runs one linear pass — the live-children count is built as a single pass index (measured p50 per pass at 500/1000/2000 rows: 4.45/21.66/85.87 ms before, 0.20/0.33/0.38 ms after).
+The browser half subscribes to event sources only: no polling, no periodic timers, and audio is decoded once. The session catalog, however, is notified for every committed event — the Host pushes every changed projection, and `subagentTiming` changes on every event while a turn is active — so the per-notification pass stays O(N) with a tiny constant: the live-children index is built lazily only when a settle check actually runs and is cached per catalog snapshot (p50 at 500/1000/2000 rows: pass 0.12/0.21/0.45 → 0.05/0.11/0.26 ms; lazy index 0.08/0.14/0.30 ms once per settle, shared by a burst of settles). Roster snapshots rebuild `rows` on every job output observation, but each session's row array reference is stable, so output-only frames skip the catalog pass entirely. The settings-form listener is bound to the plugin fiber with `ctx.effect`, so a hot reload releases it. Reproduce with `npm run build && node scripts/bench-watcher.mjs`.
 
 Not published to npm; install from the GitHub Release tarball.
 

@@ -153,6 +153,10 @@ function fakeJobs() {
       rows = next;
       for (const listener of [...listeners]) listener();
     },
+    /** Notify subscribers without moving any roster, the way an output observation does. */
+    poke() {
+      for (const listener of [...listeners]) listener();
+    },
   };
 }
 
@@ -259,6 +263,27 @@ test('waiting on a live job stays silent until the job settles', () => {
   h.clock.advance(5000);
   assert.deepEqual(h.rings, []);
   h.jobs.set({ a: [{ status: 'completed', owner: 'a' }] });
+  h.clock.advance(1500);
+  assert.deepEqual(h.rings, ['done']);
+});
+
+test('an output-only roster frame does not rerun the settle pass', () => {
+  const h = harness();
+  h.attach();
+  h.update(sessionsOf({ a: { running: true } }));
+  h.jobs.set({ a: [{ status: 'running', owner: 'a' }] });
+  h.update(sessionsOf({ a: { running: false } }));
+  h.clock.advance(1500);
+  // The check saw the live job and left the quiet stretch pending without a timer.
+  assert.deepEqual(h.rings, []);
+  assert.equal(h.clock.pending(), 0);
+  // The job model notifies on output frames too, but no roster moved: the pass
+  // must not reschedule the settle check for that.
+  h.jobs.poke();
+  assert.equal(h.clock.pending(), 0, 'output-only roster frames must not schedule a pass');
+  // A real roster change still lands and lets the chime ring after the quiet period.
+  h.jobs.set({ a: [{ status: 'completed', owner: 'a' }] });
+  assert.equal(h.clock.pending(), 1);
   h.clock.advance(1500);
   assert.deepEqual(h.rings, ['done']);
 });
@@ -384,21 +409,32 @@ test('a session that leaves the catalog releases its roster watch', () => {
  */
 function applyHarness() {
   const value: Record<string, unknown> = { debounceMs: 0 };
+  const formListeners = new Set<() => void>();
   const form = {
     getSnapshot: () => ({ status: 'ready', writable: true, revision: 1, value }),
-    subscribe: () => () => {},
+    subscribe(listener: () => void) {
+      formListeners.add(listener);
+      return () => {
+        formListeners.delete(listener);
+      };
+    },
     mutate: async () => true,
   };
   const sessionListeners = new Set<() => void>();
   let sessionSnapshot: SessionListSnapshot = { ids: [], byId: {} };
   const pendingInjections: ((scope: unknown) => unknown)[] = [];
+  const effects: (() => void)[] = [];
   const ctx = {
     configForms: {
       get: () => form,
       whileServed: (_rows: readonly string[], register: () => unknown) => register(),
     },
     slots: { inject: () => undefined, register: () => undefined },
-    effect: (callback: () => unknown) => callback(),
+    effect: (callback: () => unknown) => {
+      const disposer = callback();
+      if (typeof disposer === 'function') effects.push(disposer as () => void);
+      return disposer;
+    },
     inject: (_names: readonly string[], register: (scope: unknown) => unknown) => {
       pendingInjections.push(register);
       return undefined;
@@ -419,12 +455,18 @@ function applyHarness() {
   };
   return {
     ctx,
+    formListeners,
     setSessions(next: SessionListSnapshot) {
       sessionSnapshot = next;
       for (const listener of [...sessionListeners]) listener();
     },
     provideJobs(service: unknown) {
       for (const register of pendingInjections.splice(0)) register({ jobs: service });
+    },
+    /** Run every registered effect disposer, the way a plugin fiber unload does. */
+    dispose() {
+      for (const disposer of effects.reverse()) disposer();
+      effects.length = 0;
     },
   };
 }
@@ -462,6 +504,14 @@ test('apply adopts the job roster when the service arrives after activation', ()
   } finally {
     Reflect.set(windowStub, 'AudioContext', previous);
   }
+});
+
+test('disposing the plugin releases the settings-form listener', () => {
+  const h = applyHarness();
+  client.apply(h.ctx);
+  assert.equal(h.formListeners.size, 1, 'the settings form listener is installed');
+  h.dispose();
+  assert.equal(h.formListeners.size, 0, 'the settings form listener is released with the plugin fiber');
 });
 
 /** Minimal settings-form stub matching the public service contract. */

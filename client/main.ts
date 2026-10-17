@@ -158,7 +158,30 @@ window.__ModuleLoader__.load({
         return live
       }
 
-      /** Running direct children per parent, built once per catalog pass. */
+      /**
+       * Whether two roster snapshots carry the same per-session rows.
+       *
+       * The job model rebuilds the snapshot object on every change — including
+       * per-job output observations that only touch `observed` — but it keeps
+       * each session's row ARRAY reference until that session's roster actually
+       * changes. Comparing those references lets the watcher skip a catalog pass
+       * for output-only frames.
+       *
+       * @param left - the rows of the previous snapshot.
+       * @param right - the rows of the incoming snapshot.
+       * @returns true when no session's roster moved.
+       */
+      function sameRosterRows(left: JobsSnapshot['rows'], right: JobsSnapshot['rows']): boolean {
+        if (left === right) return true
+        const keys = Object.keys(left)
+        if (keys.length !== Object.keys(right).length) return false
+        for (const key of keys) {
+          if (left[key] !== right[key]) return false
+        }
+        return true
+      }
+
+      /** Running direct children per parent, built once per catalog snapshot on demand. */
       interface ChildIndex {
         /** Running children a parent's own `subagentCatalog` attributes to it. */
         readonly catalog: Map<string, number>
@@ -169,7 +192,7 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Index the running direct children of every parent in one catalog pass.
+       * Index the running direct children of every parent in one walk.
        *
        * Two sources, because neither is complete alone: catalog rows carry the
        * live running flag, and the parent's own `subagentCatalog` projection is
@@ -177,12 +200,13 @@ window.__ModuleLoader__.load({
        * child row the client does not attribute (a subagent fallback row may
        * arrive without `parentId`, and host-list membership is not guaranteed).
        *
-       * Indexing is what keeps a pass linear. Asking each parent for its own
-       * children walked the whole catalog once per parent, so N sessions cost N²
-       * work per pass — and the catalog notifies on every incoming host frame
-       * (its notifier only batches them into a microtask), which made a
-       * thousand-session instance spend tens of milliseconds per frame on this
-       * alone.
+       * The index is built LAZILY, once per catalog snapshot, and only when a
+       * settle check actually runs: the catalog notifier fires for every
+       * committed session event (every registered projection is pushed, and
+       * `subagentTiming` changes on each event while a turn is active), while a
+       * settle check runs at most once per quiet stretch. Building the maps and
+       * sets on every frame was the dominant cost of an otherwise trivial pass.
+       * A burst of settling sessions shares one index per snapshot.
        *
        * A child that only the projection knows still needs a local row to look
        * live: an activation owned by an external provider has no local Session
@@ -196,16 +220,19 @@ window.__ModuleLoader__.load({
         const parent = new Map<string, number>()
         const catalog = new Map<string, number>()
         const overlap = new Map<string, number>()
+        // Reused across parents: one set per snapshot instead of one per parent.
+        const seen = new Set<string>()
         for (const sessionId of sessions.ids) {
-          const row = sessions.byId[sessionId]
-          if (row === undefined || row.running !== true || row.parentId === undefined) continue
-          parent.set(row.parentId, (parent.get(row.parentId) ?? 0) + 1)
-        }
-        for (const sessionId of sessions.ids) {
-          const row = sessions.byId[sessionId] as { projectionValues?: { subagentCatalog?: unknown } } | undefined
-          const entries = row?.projectionValues?.subagentCatalog
+          const row = sessions.byId[sessionId] as
+            | { running?: boolean; parentId?: string; projectionValues?: { subagentCatalog?: unknown } }
+            | undefined
+          if (row === undefined) continue
+          if (row.running === true && row.parentId !== undefined) {
+            parent.set(row.parentId, (parent.get(row.parentId) ?? 0) + 1)
+          }
+          const entries = row.projectionValues?.subagentCatalog
           if (!Array.isArray(entries)) continue
-          const seen = new Set<string>()
+          seen.clear()
           let live = 0
           let both = 0
           for (const entry of entries) {
@@ -223,11 +250,22 @@ window.__ModuleLoader__.load({
         return { catalog, parent, overlap }
       }
 
-      /** Working direct children of one session, read from the pass index. */
+      /** Working direct children of one session, read from the cached index. */
       function liveChildrenOf(sessionId: string, index: ChildIndex): number {
         return (index.catalog.get(sessionId) ?? 0)
           + (index.parent.get(sessionId) ?? 0)
           - (index.overlap.get(sessionId) ?? 0)
+      }
+
+      /** The child index for the latest catalog, built once per snapshot on demand. */
+      let indexedCatalog: SessionListSnapshot | undefined
+      let indexCache: ChildIndex | undefined
+      function childrenIndex(): ChildIndex {
+        if (indexedCatalog !== lastCatalog) {
+          indexedCatalog = lastCatalog
+          indexCache = childIndexOf(lastCatalog)
+        }
+        return indexCache as ChildIndex
       }
 
       /**
@@ -271,8 +309,14 @@ window.__ModuleLoader__.load({
         let attached = true
         roster = service
         rosterSnapshot = service.state.getSnapshot()
+        let rows = rosterSnapshot.rows
         const stop = service.state.subscribe(() => {
-          rosterSnapshot = service.state.getSnapshot()
+          const snapshot = service.state.getSnapshot()
+          rosterSnapshot = snapshot
+          // Output observations notify this same source without moving any
+          // session's roster; a full catalog pass per output frame is waste.
+          if (sameRosterRows(rows, snapshot.rows)) return
+          rows = snapshot.rows
           update(lastCatalog)
         })
         update(lastCatalog)
@@ -306,12 +350,22 @@ window.__ModuleLoader__.load({
         return typeof phase === 'string' ? phase : null
       }
 
-      /** Run the settle check for one session after its quiet period elapsed. */
+      /**
+       * Run the settle check for one session after its quiet period elapsed.
+       *
+       * The live-child count is read HERE, not in the pass: the catalog notifies
+       * on every committed event (projection frames), while this check runs at
+       * most once per quiet stretch. The index is cached per catalog snapshot, so
+       * several sessions settling after one frame share a single build.
+       *
+       * @param sessionId - the session whose debounce timer elapsed.
+       */
       function check(sessionId: string): void {
         const state = tracked.get(sessionId)
         if (state === undefined) return
         state.timer = undefined
         if (state.notified) return
+        state.observation.liveChildren = liveChildrenOf(sessionId, childrenIndex())
         if (!isSettled(state.observation)) return
         state.notified = true
         deps.ring('done', { id: sessionId, title: state.title })
@@ -341,8 +395,6 @@ window.__ModuleLoader__.load({
         lastCatalog = sessions
         const now = deps.now()
         const seen = new Set<string>()
-        // One indexed walk over the catalog replaces a per-parent scan.
-        const children = childIndexOf(sessions)
         for (const sessionId of sessions.ids) {
           const row = sessions.byId[sessionId]
           if (row === undefined) continue
@@ -365,10 +417,10 @@ window.__ModuleLoader__.load({
           const phase = phaseOf(row)
           state.title = titleOf(row)
           // Mutated in place: the object is private to the watcher, and a pass
-          // runs up to once per animation frame per session.
+          // runs once per catalog notification batch (the notifier microtask-batches
+          // host frames). The child index is deliberately not built here.
           state.observation.running = running
           state.observation.liveJobs = liveJobsOf(sessionId)
-          state.observation.liveChildren = liveChildrenOf(sessionId, children)
           state.observation.goalPhase = phase
           if (running) state.lastBusyAt = now
 
@@ -1300,10 +1352,13 @@ window.__ModuleLoader__.load({
       let latest: ChimeSettings = settingsOf(form.getSnapshot().value)
       /** The sidebar switch reads this flag instead of the whole settings object. */
       const restFlag = createFlag(booleanOf(form.getSnapshot().value, 'restMode', false))
-      form.subscribe(() => {
+      // The form outlives this fiber (it belongs to the settings service), so the
+      // listener must be released with the plugin: a hot reload would otherwise
+      // accumulate listeners that keep the old audio context alive.
+      ctx.effect(() => form.subscribe(() => {
         latest = settingsOf(form.getSnapshot().value)
         restFlag.set(latest.restMode)
-      })
+      }), 'dsh-session-chime: settings form')
 
       const banner = createBanner()
       /** The ring currently playing, if any; the banner and the min-ring guard read it. */
